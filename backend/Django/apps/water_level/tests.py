@@ -16,7 +16,7 @@ class WaterLevelReadingModelTest(TestCase):
     def setUp(self):
         self.reading = WaterLevelReading.objects.create(
             water_level_cm=50,
-            status='Alert',
+            status='Warning',
             timestamp=timezone.now(),
             sensor_status='online',
             gsm_status='connected'
@@ -25,47 +25,31 @@ class WaterLevelReadingModelTest(TestCase):
     def test_reading_creation(self):
         """Test reading creation."""
         self.assertEqual(self.reading.water_level_cm, 50)
-        self.assertEqual(self.reading.status, 'Alert')
+        self.assertEqual(self.reading.status, 'Warning')
         self.assertEqual(self.reading.sensor_status, 'online')
         self.assertEqual(self.reading.gsm_status, 'connected')
     
-    def test_determine_status_normal(self):
-        """Test status determination for normal level."""
-        reading = WaterLevelReading.objects.create(
-            water_level_cm=25,
-            timestamp=timezone.now()
-        )
-        self.assertEqual(reading.status, 'Normal')
+    def test_determine_status_normal_below_warning(self):
+        """Levels below 2 cm remain Normal."""
+        self.assertEqual(WaterLevelReading.get_flood_status(1.99), 'Normal')
     
-    def test_determine_status_alert(self):
-        """Test status determination for alert level."""
-        reading = WaterLevelReading.objects.create(
-            water_level_cm=50,
-            timestamp=timezone.now()
-        )
-        self.assertEqual(reading.status, 'Alert')
+    def test_determine_status_warning_boundary(self):
+        """Warning begins at 2 cm."""
+        self.assertEqual(WaterLevelReading.get_flood_status(2), 'Warning')
     
     def test_determine_status_warning(self):
         """Test status determination for warning level."""
-        reading = WaterLevelReading.objects.create(
-            water_level_cm=65,
-            timestamp=timezone.now()
-        )
-        self.assertEqual(reading.status, 'Warning')
+        self.assertEqual(WaterLevelReading.get_flood_status(2.99), 'Warning')
     
     def test_determine_status_danger(self):
         """Test status determination for danger level."""
-        reading = WaterLevelReading.objects.create(
-            water_level_cm=80,
-            timestamp=timezone.now()
-        )
-        self.assertEqual(reading.status, 'Danger')
+        self.assertEqual(WaterLevelReading.get_flood_status(3), 'Danger')
     
     def test_reading_str(self):
         """Test reading string representation."""
         str_repr = str(self.reading)
         self.assertIn('50', str_repr)
-        self.assertIn('Alert', str_repr)
+        self.assertIn('Warning', str_repr)
 
 
 class WaterLevelAPITest(TestCase):

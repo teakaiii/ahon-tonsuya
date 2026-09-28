@@ -59,9 +59,6 @@ class WaterLevelReading(models.Model):
         """
         if water_level >= settings.DANGER_THRESHOLD:
             return 'Danger'
-        elif water_level >= settings.WARNING_THRESHOLD:
+        if water_level >= settings.WARNING_THRESHOLD:
             return 'Warning'
-        elif water_level >= settings.ALERT_THRESHOLD:
-            return 'Alert'
-        else:
-            return 'Normal'
+        return 'Normal'

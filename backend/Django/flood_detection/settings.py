@@ -29,6 +29,11 @@ ALLOWED_HOSTS = config(
     default='localhost,127.0.0.1,pretense-landslide-gigahertz.ngrok-free.dev'
 ).split(',')
 
+CSRF_TRUSTED_ORIGINS = config(
+    'CSRF_TRUSTED_ORIGINS',
+    default='https://pretense-landslide-gigahertz.ngrok-free.dev'
+).split(',')
+
 
 # Application definition
 
@@ -231,13 +236,12 @@ AI_PREDICTION_ENABLED = config('AI_PREDICTION_ENABLED', default=True, cast=bool)
 # Flood Thresholds (in cm)
 # Keep these values aligned with the Arduino firmware in
 # hardware/Arduino/flood_detection.ino.
-# The sensor board exposes only about 4 cm of active trace, so the app uses
-# the same alert, warning, and danger boundaries as the firmware rather than
-# a larger full-scale gauge.
+# The sensor board exposes about 4 cm of active trace. At the current 0-600
+# ADC calibration, firmware boundaries 300 and 450 correspond to 2 cm and 3 cm.
 NORMAL_THRESHOLD = config('NORMAL_THRESHOLD', default=0.0, cast=float)
-ALERT_THRESHOLD = config('ALERT_THRESHOLD', default=45.0, cast=float)
-WARNING_THRESHOLD = config('WARNING_THRESHOLD', default=60.0, cast=float)
-DANGER_THRESHOLD = config('DANGER_THRESHOLD', default=75.0, cast=float)
+WARNING_THRESHOLD = config('WARNING_THRESHOLD', default=2.0, cast=float)
+ALERT_THRESHOLD = WARNING_THRESHOLD
+DANGER_THRESHOLD = config('DANGER_THRESHOLD', default=3.0, cast=float)
 
 
 # Sensor Configuration

@@ -41,13 +41,16 @@ const Analytics = () => {
   const [currentWaterLevel, setCurrentWaterLevel] = useState(null)
   const [alertHistory, setAlertHistory] = useState([])
   const [smsStatistics, setSmsStatistics] = useState([])
-  const [predictionAccuracy, setPredictionAccuracy] = useState(null)
+  const [decisionSupport, setDecisionSupport] = useState(null)
   const [residentDistribution, setResidentDistribution] = useState([])
 
   useEffect(() => {
     fetchAllAnalytics()
 
-    const interval = setInterval(fetchCurrentWaterLevel, 10000)
+    const interval = setInterval(() => {
+      fetchCurrentWaterLevel()
+      fetchDecisionSupport()
+    }, 10000)
     return () => clearInterval(interval)
   }, [timeRange])
 
@@ -59,7 +62,7 @@ const Analytics = () => {
         fetchWaterLevelTrend(),
         fetchAlertHistory(),
         fetchSMSStatistics(),
-        fetchPredictionAccuracy(),
+        fetchDecisionSupport(),
         fetchResidentDistribution()
       ])
       setError(null)
@@ -117,12 +120,12 @@ const Analytics = () => {
     }
   }
 
-  const fetchPredictionAccuracy = async () => {
+  const fetchDecisionSupport = async () => {
     try {
-      const response = await api.get('/api/dashboard/prediction-accuracy/')
-      setPredictionAccuracy(response.data)
+      const response = await api.get('/api/dashboard/decision-support/')
+      setDecisionSupport(response.data)
     } catch (err) {
-      console.error('Failed to fetch prediction accuracy:', err)
+      console.error('Failed to fetch decision support:', err)
     }
   }
 
@@ -308,46 +311,46 @@ const Analytics = () => {
           </Card>
         </Grid>
 
-        {/* Prediction Accuracy */}
-        {predictionAccuracy && (
+        {/* Decision Support Metrics */}
+        {decisionSupport && (
           <Grid item xs={12}>
             <Card>
               <CardContent>
                 <Typography variant="h6" gutterBottom>
-                  AI Prediction Accuracy
+                  Decision Support Metrics
                 </Typography>
                 <Grid container spacing={3}>
                   <Grid item xs={12} sm={6} md={3}>
                     <Box textAlign="center">
                       <Typography variant="h3" color="primary">
-                        {predictionAccuracy.average_confidence}%
+                        {decisionSupport.risk_percentage ?? '--'}%
                       </Typography>
                       <Typography variant="body2" color="textSecondary">
-                        Average Confidence
+                        Operational Risk Score
                       </Typography>
                     </Box>
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
                     <Box textAlign="center">
                       <Typography variant="h3" color="success.main">
-                        {predictionAccuracy.total_predictions}
+                        {decisionSupport.data_confidence ?? '--'}%
                       </Typography>
                       <Typography variant="body2" color="textSecondary">
-                        Total Predictions
+                        Data Confidence
                       </Typography>
                     </Box>
                   </Grid>
                   <Grid item xs={12} sm={12} md={6}>
                     <Box>
                       <Typography variant="body2" gutterBottom>
-                        Severity Distribution:
+                        Current Assessment: {decisionSupport.status || 'Unavailable'}
                       </Typography>
-                      {predictionAccuracy.severity_distribution?.map((item) => (
-                        <Box key={item.severity} display="flex" justifyContent="space-between" mb={1}>
-                          <Typography variant="body2">{item.severity}</Typography>
-                          <Typography variant="body2">{item.count}</Typography>
-                        </Box>
-                      ))}
+                      <Typography variant="body2" color="text.secondary">
+                        {decisionSupport.status_summary || 'No decision support summary available.'}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Risk score is an operational indicator, not measured model accuracy.
+                      </Typography>
                     </Box>
                   </Grid>
                 </Grid>

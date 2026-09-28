@@ -44,6 +44,7 @@ PORT_GLOBS = [
 
 VALID_STATUSES = {"Normal", "Alert", "Warning", "Danger"}
 VALID_SENSOR_STATUSES = {"online", "offline", "error"}
+VALID_GSM_STATUSES = {"connected", "disconnected", "error"}
 
 
 class BridgeConfig:
@@ -71,6 +72,14 @@ class BridgeConfig:
         """
         if GSM_READY_RE.search(line):
             self._gsm_seen = True
+
+    def resolve_gsm_status(self, payload_status):
+        """Prefer an explicit CLI override, otherwise use device status or detection."""
+        if self._gsm_mode != "auto":
+            return self._gsm_mode
+        if payload_status in VALID_GSM_STATUSES:
+            return payload_status
+        return self.gsm_status
 
 
 class APIClient:
@@ -141,6 +150,33 @@ class APIClient:
 
 def autodetect_port():
     """Return the single obvious serial port, or None."""
+    if sys.platform == "win32":
+        from serial.tools import list_ports
+
+        ports = list(list_ports.comports())
+        usb_serial_markers = ("arduino", "usb serial", "usb-serial", "ch340", "cp210", "ftdi")
+        candidates = [
+            port for port in ports
+            if any(
+                marker in f"{port.description} {port.manufacturer or ''} {port.hwid}".lower()
+                for marker in usb_serial_markers
+            )
+        ]
+        if len(candidates) == 1:
+            return candidates[0].device
+        if candidates:
+            logger.warning(
+                "Multiple USB serial ports found: %s. Pass --port explicitly.",
+                ", ".join(port.device for port in candidates),
+            )
+            return None
+        if ports:
+            logger.warning(
+                "Serial ports found but no recognizable USB serial device: %s. Pass --port explicitly.",
+                ", ".join(f"{port.device} ({port.description})" for port in ports),
+            )
+            return None
+
     found = []
     for pattern in PORT_GLOBS:
         found.extend(glob.glob(pattern))
@@ -174,6 +210,9 @@ def parse_line(line, cfg):
     line = line.strip()
     if not line:
         return None
+
+    if line.startswith("[DEBUG] Payload: "):
+        line = line.partition(": ")[2]
 
     cfg.note_line(line)
 
@@ -215,27 +254,30 @@ def parse_line(line, cfg):
     if sensor_status not in VALID_SENSOR_STATUSES:
         sensor_status = "online"
 
-    return build_reading(level, status, sensor_status, cfg)
+    return build_reading(level, status, sensor_status, cfg, data.get("gsm_status"))
 
 
-def build_reading(level, status, sensor_status, cfg):
+def build_reading(level, status, sensor_status, cfg, gsm_status=None):
     return {
         "water_level_cm": level,
         "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "sensor_status": sensor_status,
-        "gsm_status": cfg.gsm_status,
+        "gsm_status": cfg.resolve_gsm_status(gsm_status),
     }
 
 
-# Matches the Django thresholds, which are calibrated for the ~4 cm strip.
-def derive_status(level, alert=1.5, warning=2.0, danger=3.7):
+def should_post_reading(reading_status, last_post, last_status, min_interval, now):
+    """Post at the normal interval, or immediately when telemetry status changes."""
+    return reading_status != last_status or now - last_post >= min_interval
+
+
+# Matches the Arduino ADC thresholds converted to centimetres for the 4 cm strip.
+def derive_status(level, warning=2.0, danger=3.0):
     if level >= danger:
         return "Danger"
     if level >= warning:
         return "Warning"
-    if level >= alert:
-        return "Alert"
     return "Normal"
 
 
@@ -316,7 +358,7 @@ def main():
     )
     parser.add_argument(
         "--gsm-status", choices=("auto", "connected", "disconnected"), default="auto",
-        help="Reported GSM state; 'auto' trusts the sketch's GSM banner (default: auto)",
+        help="GSM state override; 'auto' trusts device telemetry then the sketch banner (default: auto)",
     )
     parser.add_argument("--simulate", action="store_true", help="Generate fake readings, no hardware")
     parser.add_argument("--once", action="store_true", help="Post a single reading and exit")
@@ -354,6 +396,7 @@ def main():
     posted = 0
     skipped = 0
     last_post = 0.0
+    last_status = None
 
     try:
         for line in source:
@@ -363,12 +406,15 @@ def main():
 
             # Throttle: the sketch reads faster than the DB needs rows.
             now = time.monotonic()
-            if not args.once and now - last_post < args.min_interval:
+            if not args.once and not should_post_reading(
+                reading["status"], last_post, last_status, args.min_interval, now
+            ):
                 skipped += 1
                 continue
 
             if client.post_reading(reading):
                 last_post = now
+                last_status = reading["status"]
                 posted += 1
                 logger.info(
                     "Stored %.2f cm (%s)  [posted=%d skipped=%d]",

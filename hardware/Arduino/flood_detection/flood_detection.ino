@@ -1,5 +1,7 @@
 #include <SoftwareSerial.h>
 #include <avr/pgmspace.h>
+#include <EEPROM.h>
+#include <string.h>
 
 SoftwareSerial gsmSerial(7, 8);
 
@@ -9,28 +11,40 @@ const int LED_GREEN  = 13;
 const int LED_YELLOW = 12;
 const int LED_RED    = 11;
 
+// Calibrate RAW_DRY and RAW_WET using this sensor and the water it will measure.
+const int SENSOR_RAW_DRY = 0;
+const int SENSOR_RAW_WET = 600;
+const float SENSOR_SPAN_CM = 4.0f;
+const int SENSOR_SAMPLE_COUNT = 10;
+
 // CONFIGURATION
 const char RECIPIENT_PHONE[] PROGMEM = "+639077650549";
+const size_t RECIPIENT_PHONE_SIZE = 17;
+char recipientPhone[RECIPIENT_PHONE_SIZE];
 const char APN[] PROGMEM = "internet";
 
 // PUBLIC NO-AUTH ENDPOINT NG DJANGO BACKEND
 const char NGROK_URL[] PROGMEM = "http://pretense-landslide-gigahertz.ngrok-free.dev/api/water-level/public-ingest/";
 
 // THRESHOLDS
-// NOTE: I-verify muli gamit ang Serial Monitor ang aktwal na max reading ng sensor
-// bago tanggapin ang mga values na ito. Sa lumang working code, 550 ang CRITICAL
-// (base sa max reading na ~600-602). Baguhin kung iba na ang kalibrasyon ngayon.
+// With ADC 0-600 mapped to 0-4 cm, these are 2 cm Warning and 3 cm Danger.
 const int THRESHOLD_WARNING  = 300;
-const int THRESHOLD_CRITICAL = 500;
+const int THRESHOLD_CRITICAL = 450;
 
 int currentAlertState = -1;
 bool isGprsConnected = false;
-bool hasSentSMS = false;
-unsigned long lastSmsTime = 0;
+bool hasSentWarningSMS = false;
+unsigned long lastWarningSmsTime = 0;
+int pendingSmsState = 0;
+int lastSmsAttemptState = 0;
+unsigned long lastSmsAttemptTime = 0;
+bool hasAttemptedSMS = false;
 const unsigned long SMS_COOLDOWN = 300000;
+const unsigned long SMS_RETRY_INTERVAL = 60000;
 
 // TIMING CONTROL
 unsigned long lastHttpPostTime = 0;
+int lastHttpAttemptedState = -1;
 const unsigned long HTTP_POST_INTERVAL = 5000; // 5 seconds
 
 void setup() {
@@ -49,18 +63,28 @@ void setup() {
   Serial.println(F(" AHON-FloodWatch-3 Initializing...     "));
   Serial.println(F("========================================="));
 
+  loadRecipientPhone();
+  Serial.println(F("[CONFIG] Use GET_PHONE or SET_PHONE=+639XXXXXXXXX in Serial Monitor."));
+
   delay(2000);
   initGSM();
 }
 
 void loop() {
-  int waterValue = analogRead(SENSOR_PIN);
+  processSerialCommand();
 
-  Serial.print(F("Current Sensor Value: "));
-  Serial.println(waterValue);
+  int waterValue = readWaterSensorRaw();
+  float waterLevelCm = rawToWaterLevelCm(waterValue);
+
+  Serial.print(F("Current Sensor ADC: "));
+  Serial.print(waterValue);
+  Serial.print(F(" | Water Level: "));
+  Serial.print(waterLevelCm, 1);
+  Serial.println(F(" cm"));
 
   const char *currentStatus = "Normal";
-  bool isCritical = false;
+  bool sendWarningSms = false;
+  bool sendCriticalSms = false;
 
   // ==========================================
   // 1. LED LOGIC & SMS ALERTS
@@ -73,6 +97,9 @@ void loop() {
 
     if (currentAlertState != 0) {
       currentAlertState = 0;
+      if (pendingSmsState == 1) {
+        pendingSmsState = 0;
+      }
       Serial.println(F("[STATUS] Normal Level - GREEN LED"));
     }
   }
@@ -85,10 +112,8 @@ void loop() {
     if (currentAlertState != 1) {
       currentAlertState = 1;
       Serial.println(F("[STATUS] Warning Level - YELLOW LED"));
-      if (!hasSentSMS || millis() - lastSmsTime >= SMS_COOLDOWN) {
-        sendSMS(F("FLOOD WARNING: Water level reached the warning threshold. Monitor the situation and prepare to evacuate if instructed."));
-        lastSmsTime = millis();
-        hasSentSMS = true;
+      if (!hasSentWarningSMS || millis() - lastWarningSmsTime >= SMS_COOLDOWN) {
+        sendWarningSms = true;
       } else {
         Serial.println(F("[SMS] Warning alert skipped during cooldown."));
       }
@@ -99,28 +124,54 @@ void loop() {
     digitalWrite(LED_YELLOW, LOW);
     digitalWrite(LED_RED, HIGH);
     currentStatus = "Danger";
-    isCritical = true;
 
     if (currentAlertState != 2) {
       currentAlertState = 2;
+      pendingSmsState = 2;
       Serial.println(F("[STATUS] CRITICAL LEVEL - RED LED! Sending Emergency SMS..."));
-      // FIX: flush any stray bytes sitting in the GSM serial buffer (e.g. leftover
-      // HTTP response data) before issuing the SMS command sequence.
-      flushGsmSerial();
-      sendSMS(F("EMERGENCY FLOOD ALERT: High water level detected! Evacuate immediately!"));
-      lastSmsTime = millis();
-      hasSentSMS = true;
+      sendCriticalSms = true;
+    }
+  }
+
+  printSerialTelemetry(waterLevelCm, currentStatus);
+
+  if (sendCriticalSms) {
+    pendingSmsState = 2;
+  } else if (sendWarningSms && pendingSmsState != 2) {
+    pendingSmsState = 1;
+  }
+
+  if (pendingSmsState != 0 &&
+      (!hasAttemptedSMS || pendingSmsState != lastSmsAttemptState ||
+       millis() - lastSmsAttemptTime >= SMS_RETRY_INTERVAL)) {
+    int attemptedState = pendingSmsState;
+    lastSmsAttemptState = attemptedState;
+    lastSmsAttemptTime = millis();
+    hasAttemptedSMS = true;
+
+    bool smsAccepted = attemptedState == 2
+        ? sendSMS(F("EMERGENCY FLOOD ALERT: High water level detected. Evacuate immediately!"))
+        : sendSMS(F("FLOOD WARNING: Water level is rising. Please stay alert and prepare for possible evacuation."));
+
+    if (smsAccepted) {
+      pendingSmsState = 0;
+      if (attemptedState == 1) {
+        hasSentWarningSMS = true;
+        lastWarningSmsTime = millis();
+      }
     }
   }
 
   // ==========================================
   // 2. HTTP POST TO DJANGO BACKEND
   // ==========================================
-  // FIX: skip the HTTP POST this cycle if we just handled a fresh CRITICAL
-  // transition above, so the SMS command isn't delayed/blocked by an HTTP
-  // transaction that can take several seconds to complete.
-  if (!isCritical && (millis() - lastHttpPostTime >= HTTP_POST_INTERVAL)) {
+  // Upload status changes, including Danger, and refresh at the normal
+  // interval. USB telemetry is emitted first so the bridge receives it before
+  // the SMS and HTTP modem operations.
+  if (currentAlertState != lastHttpAttemptedState ||
+      millis() - lastHttpPostTime >= HTTP_POST_INTERVAL) {
     lastHttpPostTime = millis();
+    lastHttpAttemptedState = currentAlertState;
 
     const char *gsmStatusStr = isGprsConnected ? "connected" : "disconnected";
 
@@ -132,16 +183,12 @@ void loop() {
     // FIX: removed the stray leading "{" that was producing invalid JSON
     // like {{"water_level_cm":...}  (double open-brace, single close-brace).
     jsonPayload += F("{\"water_level_cm\":");
-    jsonPayload += String(waterValue);
+    jsonPayload += String(waterLevelCm, 1);
     jsonPayload += F(",\"status\":\"");
     jsonPayload += currentStatus;
     jsonPayload += F("\",\"sensor_status\":\"online\",\"gsm_status\":\"");
     jsonPayload += gsmStatusStr;
     jsonPayload += F("\"}");
-
-    Serial.println(F(">>> Sending Live Reading to Django Backend..."));
-    Serial.print(F("[DEBUG] Payload: "));
-    Serial.println(jsonPayload);
 
     bool uploadSuccess = sendHttpPost(jsonPayload);
 
@@ -156,6 +203,115 @@ void loop() {
   }
 
   delay(1000);
+}
+
+bool isValidPhoneNumber(const char *phone) {
+  size_t length = strlen(phone);
+  if (phone[0] != '+' || length < 9 || length >= RECIPIENT_PHONE_SIZE) {
+    return false;
+  }
+  for (size_t index = 1; index < length; index++) {
+    if (phone[index] < '0' || phone[index] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void loadRecipientPhone() {
+  char storedPhone[RECIPIENT_PHONE_SIZE];
+  for (size_t index = 0; index < RECIPIENT_PHONE_SIZE; index++) {
+    storedPhone[index] = EEPROM.read(index);
+  }
+  storedPhone[RECIPIENT_PHONE_SIZE - 1] = '\0';
+
+  if (isValidPhoneNumber(storedPhone)) {
+    strcpy(recipientPhone, storedPhone);
+  } else {
+    strncpy_P(recipientPhone, RECIPIENT_PHONE, RECIPIENT_PHONE_SIZE);
+    recipientPhone[RECIPIENT_PHONE_SIZE - 1] = '\0';
+  }
+}
+
+void saveRecipientPhone(const char *phone) {
+  size_t length = strlen(phone);
+  for (size_t index = 0; index < RECIPIENT_PHONE_SIZE; index++) {
+    EEPROM.update(index, index <= length ? phone[index] : '\0');
+  }
+  strcpy(recipientPhone, phone);
+}
+
+void processSerialCommand() {
+  static char command[32];
+  static size_t commandLength = 0;
+
+  while (Serial.available() > 0) {
+    char character = Serial.read();
+    if (character == '\r') {
+      continue;
+    }
+    if (character != '\n') {
+      if (commandLength < sizeof(command) - 1) {
+        command[commandLength++] = character;
+      } else {
+        commandLength = 0;
+        Serial.println(F("[CONFIG] Command too long; ignored."));
+      }
+      continue;
+    }
+
+    command[commandLength] = '\0';
+    if (strcmp(command, "GET_PHONE") == 0) {
+      Serial.print(F("[CONFIG] SMS recipient: "));
+      Serial.println(recipientPhone);
+    } else if (strncmp(command, "SET_PHONE=", 10) == 0) {
+      const char *newPhone = command + 10;
+      if (isValidPhoneNumber(newPhone)) {
+        saveRecipientPhone(newPhone);
+        Serial.println(F("[CONFIG] Recipient saved to EEPROM."));
+      } else {
+        Serial.println(F("[CONFIG] Invalid number. Use + followed by 8-15 digits, no spaces."));
+      }
+    } else if (commandLength > 0) {
+      Serial.println(F("[CONFIG] Use GET_PHONE or SET_PHONE=+639XXXXXXXXX."));
+    }
+    commandLength = 0;
+  }
+}
+
+int readWaterSensorRaw() {
+  long total = 0;
+  for (int sample = 0; sample < SENSOR_SAMPLE_COUNT; sample++) {
+    total += analogRead(SENSOR_PIN);
+    delay(5);
+  }
+  return total / SENSOR_SAMPLE_COUNT;
+}
+
+float rawToWaterLevelCm(int rawValue) {
+  int rawSpan = SENSOR_RAW_WET - SENSOR_RAW_DRY;
+  if (rawSpan == 0) {
+    return 0.0f;
+  }
+
+  float levelCm = (float)(rawValue - SENSOR_RAW_DRY) * SENSOR_SPAN_CM / rawSpan;
+  if (levelCm < 0.0f) {
+    return 0.0f;
+  }
+  if (levelCm > SENSOR_SPAN_CM) {
+    return SENSOR_SPAN_CM;
+  }
+  return levelCm;
+}
+
+void printSerialTelemetry(float waterLevelCm, const char *currentStatus) {
+  Serial.print(F("[DEBUG] Payload: {\"water_level_cm\":"));
+  Serial.print(waterLevelCm, 1);
+  Serial.print(F(",\"status\":\""));
+  Serial.print(currentStatus);
+  Serial.print(F("\",\"sensor_status\":\"online\",\"gsm_status\":\""));
+  Serial.print(isGprsConnected ? F("connected") : F("disconnected"));
+  Serial.println(F("\"}"));
 }
 
 // ==========================================
@@ -178,7 +334,7 @@ void initGSM() {
   }
 
   if (!startGPRS()) {
-    Serial.println(F("[GPRS] Setup failed; check SIM registration and TNT APN."));
+    Serial.println(F("[GPRS] Setup failed; check SIM registration and configured APN."));
   }
   Serial.println(F("GSM System Initialization Complete."));
 }
@@ -203,6 +359,13 @@ bool startGPRS() {
     return false;
   }
 
+  if (!sendATCommand(F("AT+SAPBR=3,1,\"DNS\",\"8.8.8.8\""), F("OK"), 3000)) {
+    Serial.println(F("[GPRS] Primary DNS override not supported; using network DNS."));
+  }
+  if (!sendATCommand(F("AT+SAPBR=3,1,\"DNS2\",\"8.8.4.4\""), F("OK"), 3000)) {
+    Serial.println(F("[GPRS] Secondary DNS override not supported; using network DNS."));
+  }
+
   Serial.println(F("Opening GPRS Context..."));
   if (!sendATCommand(F("AT+SAPBR=1,1"), F("OK"), 8000)) {
     Serial.println(F("GPRS Connection Failed!"));
@@ -215,22 +378,22 @@ bool startGPRS() {
   return true;
 }
 
-void sendSMS(const __FlashStringHelper *message) {
+bool sendSMS(const __FlashStringHelper *message) {
   flushGsmSerial();
 
   if (!sendATCommand(F("AT+CMGF=1"), F("OK"), 2000)) {
     Serial.println(F("[SMS] Could not set text mode."));
-    return;
+    return false;
   }
 
   gsmSerial.print(F("AT+CMGS=\""));
-  gsmSerial.print((const __FlashStringHelper *)RECIPIENT_PHONE);
+  gsmSerial.print(recipientPhone);
   gsmSerial.println(F("\""));
   String prompt = waitForResponse(F(">"), 10000);
   if (prompt.indexOf('>') == -1) {
     Serial.print(F("[SMS] No message prompt from modem: "));
     Serial.println(prompt);
-    return;
+    return false;
   }
 
   gsmSerial.print(message);
@@ -238,15 +401,54 @@ void sendSMS(const __FlashStringHelper *message) {
   String result = waitForResponse(F("OK"), 30000);
   if (result.indexOf(F("+CMGS:")) != -1 && result.indexOf(F("OK")) != -1) {
     Serial.println(F(">>> SMS accepted by modem. <<<"));
+    return true;
   } else {
     Serial.print(F("[SMS] Send failed: "));
     Serial.println(result);
+    return false;
   }
 }
 
 bool sendHttpPost(const String &payload) {
+  // FIX: force-close ANY leftover/stuck HTTP session before starting a new
+  // one. If a previous cycle's cleanup HTTPTERM silently failed, the module
+  // is left with a session already open, and every future AT+HTTPINIT call
+  // will keep failing forever with "operation not allowed" until this is
+  // done. We deliberately ignore the result here — it is expected/benign to
+  // get an error if no session was actually open.
+  sendATCommand(F("AT+HTTPTERM"), F("OK"), 2000);
+  delay(200); // give the module a moment to fully release the HTTP context
+
+  // FIX: verify the GPRS bearer is actually still up (has a real IP) before
+  // attempting HTTP. GPRS can silently drop mid-session; isGprsConnected can
+  // go stale. If the bearer is down, reopen it via startGPRS() first instead
+  // of wasting a full HTTPINIT attempt that is guaranteed to fail.
+  // NOTE: AT+SAPBR=2,1 ALWAYS replies with "+SAPBR:" even when the bearer is
+  // closed (status 3/4) — that substring alone can't tell connected apart
+  // from disconnected. We specifically look for "1,1," (cid=1, status=1
+  // "connected") which only appears when the bearer genuinely has a live IP.
+  flushGsmSerial();
+  delay(50);
+  gsmSerial.println(F("AT+SAPBR=2,1"));
+  String bearerCheck = waitForResponse(F("+SAPBR:"), 3000);
+  bool bearerIsUp = bearerCheck.indexOf(F("1,1,")) != -1;
+  if (!bearerIsUp) {
+    Serial.print(F("[HTTP] Bearer check response: "));
+    Serial.println(bearerCheck);
+    Serial.println(F("[HTTP] Bearer not active, reopening GPRS before HTTP attempt..."));
+    if (!startGPRS()) {
+      Serial.println(F("[HTTP] Could not reopen GPRS bearer; aborting this POST."));
+      return false;
+    }
+    delay(200);
+  }
+
   if (!sendATCommand(F("AT+HTTPINIT"), F("OK"), 5000)) {
     Serial.println(F("[HTTP] HTTPINIT failed."));
+    // FIX: if HTTPINIT itself failed (e.g. still "operation not allowed"),
+    // force another close attempt so the NEXT cycle at least starts clean
+    // instead of compounding on top of this same stuck state.
+    sendATCommand(F("AT+HTTPTERM"), F("OK"), 2000);
     return false;
   }
 
@@ -255,13 +457,23 @@ bool sendHttpPost(const String &payload) {
   urlCommand = F("AT+HTTPPARA=\"URL\",\"");
   urlCommand += (const __FlashStringHelper *)NGROK_URL;
   urlCommand += '"';
+  // FIX: CID and URL are the essential params — if either fails, abort.
+  // CONTENT and USERDATA appear to be UNSUPPORTED tags on this particular
+  // SIM900 module's firmware (they consistently fail with "operation not
+  // allowed" even though HTTPINIT/CID/URL always succeed). Treat them as
+  // best-effort only: try them, log if they fail, but don't block the POST
+  // just because this module's firmware doesn't recognize those two tags.
   if (!sendATCommand(F("AT+HTTPPARA=\"CID\",1"), F("OK"), 3000) ||
-      !sendATCommand(urlCommand, F("OK"), 3000) ||
-      !sendATCommand(F("AT+HTTPPARA=\"CONTENT\",\"application/json\""), F("OK"), 3000) ||
-      !sendATCommand(F("AT+HTTPPARA=\"USERDATA\",\"ngrok-skip-browser-warning: true\""), F("OK"), 3000)) {
-    Serial.println(F("[HTTP] Failed to configure request parameters."));
+      !sendATCommand(urlCommand, F("OK"), 3000)) {
+    Serial.println(F("[HTTP] Failed to configure required request parameters (CID/URL)."));
     sendATCommand(F("AT+HTTPTERM"), F("OK"), 2000);
     return false;
+  }
+  if (!sendATCommand(F("AT+HTTPPARA=\"CONTENT\",\"application/json\""), F("OK"), 3000)) {
+    Serial.println(F("[HTTP] Note: CONTENT param not accepted by this module (non-fatal, continuing)."));
+  }
+  if (!sendATCommand(F("AT+HTTPPARA=\"USERDATA\",\"ngrok-skip-browser-warning: true\""), F("OK"), 3000)) {
+    Serial.println(F("[HTTP] Note: USERDATA param not accepted by this module (non-fatal, continuing)."));
   }
 
   String dataCmd;

@@ -28,10 +28,8 @@ const Settings = () => {
   const [error, setError] = useState(null)
   const [success, setSuccess] = useState(null)
   const [thresholds, setThresholds] = useState({
-    normal_threshold: 0,
-    alert_threshold: 45,
-    warning_threshold: 60,
-    danger_threshold: 75,
+    warning_threshold: 2,
+    danger_threshold: 3,
   })
   const [systemSettings, setSystemSettings] = useState({})
 
@@ -74,46 +72,6 @@ const Settings = () => {
       setSystemSettings(settings)
     } catch (err) {
       console.error('Failed to fetch system settings:', err)
-    }
-  }
-
-  const handleThresholdChange = (field, value) => {
-    setThresholds({
-      ...thresholds,
-      [field]: value === '' ? '' : Number(value)
-    })
-  }
-
-  const handleSaveThresholds = async () => {
-    try {
-      // Validate thresholds
-      if (thresholds.normal_threshold >= thresholds.alert_threshold) {
-        setError('Normal threshold must be less than Alert threshold')
-        return
-      }
-      if (thresholds.alert_threshold > thresholds.warning_threshold) {
-        setError('Warning boundary values must be consistent')
-        return
-      }
-      if (thresholds.warning_threshold >= thresholds.danger_threshold) {
-        setError('Warning threshold must be less than Danger threshold')
-        return
-      }
-
-      if (Object.values(thresholds).some((value) => value === '' || !Number.isFinite(Number(value)) || Number(value) < 0)) {
-        setError('All thresholds must be valid non-negative numbers')
-        return
-      }
-      await Promise.all(Object.entries(thresholds).map(([key, value]) => (
-        api.put(`/api/settings/key/${key}/update/`, { value: String(value) })
-      )))
-      await fetchThresholds()
-      await fetchSystemSettings()
-      setSuccess('Flood thresholds saved successfully')
-      setError(null)
-      setTimeout(() => setSuccess(null), 3000)
-    } catch (err) {
-      setError('Failed to update flood thresholds')
     }
   }
 
@@ -176,53 +134,33 @@ const Settings = () => {
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Flood Thresholds (cm)
+                Flood Thresholds (4 cm Sensor)
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Based on the installed sensor calibration: raw ADC 0-600 maps to 0-4 cm.
               </Typography>
               <Box sx={{ mt: 2 }}>
                 <TextField
                   fullWidth
-                  label="Normal Lower Bound"
-                  type="number"
-                  value={thresholds.normal_threshold}
-                  onChange={(e) => handleThresholdChange('normal_threshold', e.target.value)}
-                  sx={{ mb: 2 }}
-                  helperText="Arduino values below the alert threshold are treated as Normal"
-                />
-                <TextField
-                  fullWidth
-                  label="Alert Threshold (Arduino)"
-                  type="number"
-                  value={thresholds.alert_threshold}
-                  onChange={(e) => handleThresholdChange('alert_threshold', e.target.value)}
-                  sx={{ mb: 2 }}
-                  helperText="Matches ALERT_THRESHOLD = 45 in the Arduino sketch"
-                />
-                <TextField
-                  fullWidth
-                  label="Warning Threshold (Arduino)"
+                  label="Warning Starts (cm)"
                   type="number"
                   value={thresholds.warning_threshold}
-                  onChange={(e) => handleThresholdChange('warning_threshold', e.target.value)}
+                  InputProps={{ readOnly: true }}
                   sx={{ mb: 2 }}
-                  helperText="Matches WARNING_THRESHOLD = 60 in the Arduino sketch"
+                  helperText="ADC 300 of 600 = 2.0 cm"
                 />
                 <TextField
                   fullWidth
-                  label="Danger Threshold (Arduino)"
+                  label="Critical / Danger Starts (cm)"
                   type="number"
                   value={thresholds.danger_threshold}
-                  onChange={(e) => handleThresholdChange('danger_threshold', e.target.value)}
+                  InputProps={{ readOnly: true }}
                   sx={{ mb: 2 }}
-                  helperText="Matches DANGER_THRESHOLD = 75 in the Arduino sketch"
+                  helperText="ADC 450 of 600 = 3.0 cm"
                 />
-                <Button
-                  variant="contained"
-                  startIcon={<SaveIcon />}
-                  onClick={handleSaveThresholds}
-                  fullWidth
-                >
-                  Save Thresholds
-                </Button>
+                <Typography variant="body2">Normal: below 2.0 cm</Typography>
+                <Typography variant="body2">Warning: 2.0 cm to below 3.0 cm</Typography>
+                <Typography variant="body2">Critical / Danger: 3.0 cm and above</Typography>
               </Box>
             </CardContent>
           </Card>

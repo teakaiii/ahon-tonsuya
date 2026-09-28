@@ -31,9 +31,8 @@ class SystemSettingListView(generics.ListAPIView):
             from django.conf import settings as django_settings
             sample_settings = [
                 {'key': 'normal_threshold', 'value': str(django_settings.NORMAL_THRESHOLD), 'description': 'Normal water level threshold (cm)'},
-                {'key': 'alert_threshold', 'value': str(django_settings.ALERT_THRESHOLD), 'description': 'Alert water level threshold (cm)'},
-                {'key': 'warning_threshold', 'value': str(django_settings.WARNING_THRESHOLD), 'description': 'Warning water level threshold (cm)'},
-                {'key': 'danger_threshold', 'value': str(django_settings.DANGER_THRESHOLD), 'description': 'Danger water level threshold (cm)'},
+                {'key': 'warning_threshold', 'value': str(django_settings.WARNING_THRESHOLD), 'description': 'Warning begins at 2 cm for the calibrated sensor'},
+                {'key': 'danger_threshold', 'value': str(django_settings.DANGER_THRESHOLD), 'description': 'Critical/Danger begins at 3 cm for the calibrated sensor'},
                 {'key': 'sms_enabled', 'value': 'true', 'description': 'Enable SMS notifications'},
                 {'key': 'ai_prediction_enabled', 'value': 'true', 'description': 'Enable AI flood prediction'},
                 {'key': 'reading_interval', 'value': '30', 'description': 'Sensor reading interval (seconds)'},
@@ -173,21 +172,8 @@ def flood_thresholds_view(request):
     """
     from django.conf import settings as django_settings
 
-    defaults = {
+    return Response({
         'normal_threshold': django_settings.NORMAL_THRESHOLD,
-        'alert_threshold': django_settings.ALERT_THRESHOLD,
         'warning_threshold': django_settings.WARNING_THRESHOLD,
         'danger_threshold': django_settings.DANGER_THRESHOLD,
-    }
-    thresholds = {}
-    for key, default in defaults.items():
-        setting, _ = SystemSetting.objects.get_or_create(
-            key=key,
-            defaults={'value': str(default), 'description': f'{key.replace("_", " ").title()} (cm)'},
-        )
-        try:
-            thresholds[key] = float(setting.value)
-        except (TypeError, ValueError):
-            thresholds[key] = default
-    
-    return Response(thresholds)
+    })

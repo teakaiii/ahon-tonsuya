@@ -16,3 +16,4 @@ drf-yasg>=1.21.0
 gunicorn>=21.0.0
 whitenoise>=6.6.0
 django-filter>=23.0
+pyserial>=3.5

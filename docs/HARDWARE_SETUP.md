@@ -203,11 +203,10 @@ Edit the configuration section at the top of the file:
 #define LED_STATUS_PIN 13
 #define BUZZER_PIN 9
 
-// Flood Thresholds (in cm)
-#define NORMAL_THRESHOLD 30
-#define ALERT_THRESHOLD 45
-#define WARNING_THRESHOLD 60
-#define DANGER_THRESHOLD 75
+// Current 4 cm sensor calibration: ADC 0-600 maps to 0-4 cm.
+// These boundaries produce the three states Normal, Warning, and Danger.
+const int THRESHOLD_WARNING = 300;  // 2 cm: Warning begins
+const int THRESHOLD_CRITICAL = 450; // 3 cm: Critical/Danger begins
 
 // Timing Configuration
 #define READING_INTERVAL 30000      // 30 seconds
