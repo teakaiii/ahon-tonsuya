@@ -139,6 +139,19 @@ def dashboard_decision_support_view(request):
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
+def dashboard_water_level_forecast_view(request):
+    """Return a real-data regression forecast and chronological holdout metrics."""
+    from apps.water_level.models import WaterLevelReading
+    from .forecasting import forecast_water_level
+
+    readings = WaterLevelReading.objects.order_by('timestamp').values_list(
+        'timestamp', 'water_level_cm'
+    )
+    return Response(forecast_water_level(readings))
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
 def dashboard_overview_view(request):
     """
     API endpoint to get dashboard overview data.

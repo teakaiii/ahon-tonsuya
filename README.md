@@ -91,6 +91,8 @@ See [Quick Start Guide](docs/QUICK_START_GUIDE.md) for detailed installation ins
 - **[Security Guide](docs/SECURITY_GUIDE.md)** - Security best practices
 - **[System Architecture](docs/SYSTEM_ARCHITECTURE.md)** - Architecture overview
 - **[Database Schema](database/DATABASE_SCHEMA.md)** - Database design
+- **[Colab Water-Level Forecast](docs/AHON_FloodWatch_Colab_Forecasting.ipynb)** - Historical visualization and regression forecast
+- **[ISO/IEC 25010:2023 Evaluation Plan](docs/ISO_25010_2023_EVALUATION.md)** - Project quality test matrix
 
 ## 🔐 Security
 

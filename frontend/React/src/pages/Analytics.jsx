@@ -42,16 +42,21 @@ const Analytics = () => {
   const [alertHistory, setAlertHistory] = useState([])
   const [smsStatistics, setSmsStatistics] = useState([])
   const [decisionSupport, setDecisionSupport] = useState(null)
+  const [waterLevelForecast, setWaterLevelForecast] = useState(null)
   const [residentDistribution, setResidentDistribution] = useState([])
 
   useEffect(() => {
     fetchAllAnalytics()
 
-    const interval = setInterval(() => {
+    const currentInterval = setInterval(() => {
       fetchCurrentWaterLevel()
       fetchDecisionSupport()
     }, 10000)
-    return () => clearInterval(interval)
+    const forecastInterval = setInterval(fetchWaterLevelForecast, 60000)
+    return () => {
+      clearInterval(currentInterval)
+      clearInterval(forecastInterval)
+    }
   }, [timeRange])
 
   const fetchAllAnalytics = async () => {
@@ -63,6 +68,7 @@ const Analytics = () => {
         fetchAlertHistory(),
         fetchSMSStatistics(),
         fetchDecisionSupport(),
+        fetchWaterLevelForecast(),
         fetchResidentDistribution()
       ])
       setError(null)
@@ -126,6 +132,16 @@ const Analytics = () => {
       setDecisionSupport(response.data)
     } catch (err) {
       console.error('Failed to fetch decision support:', err)
+    }
+  }
+
+  const fetchWaterLevelForecast = async () => {
+    try {
+      const response = await api.get('/api/dashboard/water-level-forecast/')
+      setWaterLevelForecast(response.data)
+    } catch (err) {
+      console.error('Failed to fetch regression forecast:', err)
+      setWaterLevelForecast(null)
     }
   }
 
@@ -358,6 +374,61 @@ const Analytics = () => {
             </Card>
           </Grid>
         )}
+
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Water-Level Regression Forecast
+              </Typography>
+              {waterLevelForecast?.available ? (
+                <>
+                  <Grid container spacing={2}>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Typography variant="h4" color="primary">
+                        {waterLevelForecast.selected_forecast_cm} cm
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Selected estimate in {waterLevelForecast.horizon_minutes} minutes
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {waterLevelForecast.selected_method === 'random_forest'
+                          ? 'Random Forest performed better on the time-ordered holdout.'
+                          : 'Persistence baseline selected because its holdout MAE was lower.'}
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Typography variant="h5">{waterLevelForecast.model_forecast_cm} cm</Typography>
+                      <Typography variant="body2" color="text.secondary">Random Forest estimate</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Baseline: {waterLevelForecast.baseline_forecast_cm} cm
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Typography variant="subtitle2">Random Forest holdout</Typography>
+                      <Typography variant="body2">MAE: {waterLevelForecast.model_metrics.mae_cm} cm</Typography>
+                      <Typography variant="body2">RMSE: {waterLevelForecast.model_metrics.rmse_cm} cm</Typography>
+                      <Typography variant="body2">R²: {waterLevelForecast.model_metrics.r_squared}</Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Typography variant="subtitle2">Data quality</Typography>
+                      <Typography variant="body2">{waterLevelForecast.valid_readings} valid readings</Typography>
+                      <Typography variant="body2">{waterLevelForecast.excluded_readings} excluded outside 0-4 cm</Typography>
+                      <Typography variant="body2">{waterLevelForecast.supervised_rows} forecast rows</Typography>
+                    </Grid>
+                  </Grid>
+                  <Alert severity="warning" sx={{ mt: 2 }}>
+                    Exploratory forecast only. It is not validated for evacuation decisions. {waterLevelForecast.safety_note}
+                  </Alert>
+                </>
+              ) : (
+                <Alert severity="info">
+                  {waterLevelForecast?.reason || 'Forecast unavailable. Waiting for sufficient valid, continuous sensor readings.'}
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
       </Grid>
     </Box>
   )

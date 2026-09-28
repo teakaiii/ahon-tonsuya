@@ -501,12 +501,13 @@ GET /api/settings/flood-thresholds/
 **Response:**
 ```json
 {
-  "normal_threshold": 30,
-  "alert_threshold": 45,
-  "warning_threshold": 60,
-  "danger_threshold": 75
+  "normal_threshold": 0,
+  "warning_threshold": 2,
+  "danger_threshold": 3
 }
 ```
+
+These boundaries apply to the calibrated 0-4 cm sensor. Normal is below 2 cm, Warning begins at 2 cm, and Danger begins at 3 cm.
 
 ## Dashboard Endpoints
 
@@ -585,6 +586,15 @@ GET /api/dashboard/resident-distribution/
 ```
 GET /api/dashboard/system-status/
 ```
+
+#### Get Water-Level Regression Forecast
+```
+GET /api/dashboard/water-level-forecast/
+```
+
+Requires authentication. The endpoint filters historical values to the calibrated 0-4 cm range, resamples valid readings, and evaluates a Random Forest regressor on a chronological holdout against a persistence baseline. It returns forecast estimates, MAE/RMSE/R-squared, data-quality counts, and a safety note. If there is not enough continuous data, it returns `available: false` with a reason instead of a synthetic forecast. Forecasts are exploratory and must not be used as the sole basis for evacuation decisions.
+
+The existing `/api/dashboard/prediction-accuracy/` endpoint reports stored prediction confidence and severity counts; it is not measured forecast accuracy.
 
 ## Activity Logs Endpoints (Admin Only)
 

@@ -33,6 +33,7 @@ Thumbs.db
 .cache/
 staticfiles/
 backend/Django/staticfiles/
+artifacts/*.csv
 
 # Misc
 PG Local.session.sql

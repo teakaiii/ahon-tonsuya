@@ -11,7 +11,8 @@ from .views import (
     dashboard_resident_distribution_view,
     dashboard_system_status_view,
     dashboard_telemetry_view,
-    dashboard_decision_support_view
+    dashboard_decision_support_view,
+    dashboard_water_level_forecast_view,
 )
 
 urlpatterns = [
@@ -24,4 +25,5 @@ urlpatterns = [
     path('system-status/', dashboard_system_status_view, name='system_status'),
     path('telemetry/', dashboard_telemetry_view, name='telemetry'),
     path('decision-support/', dashboard_decision_support_view, name='decision_support'),
+    path('water-level-forecast/', dashboard_water_level_forecast_view, name='water_level_forecast'),
 ]
