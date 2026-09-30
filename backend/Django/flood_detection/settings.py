@@ -242,6 +242,8 @@ NORMAL_THRESHOLD = config('NORMAL_THRESHOLD', default=0.0, cast=float)
 WARNING_THRESHOLD = config('WARNING_THRESHOLD', default=2.0, cast=float)
 ALERT_THRESHOLD = WARNING_THRESHOLD
 DANGER_THRESHOLD = config('DANGER_THRESHOLD', default=3.0, cast=float)
+SENSOR_MAX_LEVEL_CM = config('SENSOR_MAX_LEVEL_CM', default=4.0, cast=float)
+READING_STALE_AFTER_SECONDS = config('READING_STALE_AFTER_SECONDS', default=30, cast=int)
 
 
 # Sensor Configuration

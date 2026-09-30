@@ -72,8 +72,10 @@ class WaterLevelAPITest(TestCase):
         
         # Create test readings
         for i in range(5):
+            level = 1.0 + i * 0.5
             WaterLevelReading.objects.create(
-                water_level_cm=30 + i * 10,
+                water_level_cm=level,
+                status=WaterLevelReading.get_flood_status(level),
                 timestamp=timezone.now() - timezone.timedelta(hours=i)
             )
     
@@ -95,6 +97,45 @@ class WaterLevelAPITest(TestCase):
         response = self.client.get('/api/water-level/current/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('water_level_cm', response.data)
+
+    def test_current_reading_does_not_create_placeholder_when_history_is_empty(self):
+        self.client.force_authenticate(user=self.user)
+        WaterLevelReading.objects.all().delete()
+
+        response = self.client.get('/api/water-level/current/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['water_level_cm'])
+        self.assertEqual(response.data['status'], 'No Data')
+        self.assertTrue(response.data['is_stale'])
+        self.assertEqual(WaterLevelReading.objects.count(), 0)
+
+    def test_current_reading_marks_older_valid_value_stale_when_newest_is_invalid(self):
+        self.client.force_authenticate(user=self.user)
+        WaterLevelReading.objects.all().delete()
+        now = timezone.now()
+        valid = WaterLevelReading.objects.create(
+            water_level_cm=3.5,
+            status='Danger',
+            timestamp=now - timezone.timedelta(seconds=5),
+            sensor_status='online',
+            gsm_status='connected',
+        )
+        WaterLevelReading.objects.create(
+            water_level_cm=4.26,
+            status='Danger',
+            timestamp=now,
+            sensor_status='online',
+            gsm_status='connected',
+        )
+
+        response = self.client.get('/api/water-level/current/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(float(response.data['water_level_cm']), 3.5)
+        self.assertEqual(response.data['reading_id'], str(valid.reading_id))
+        self.assertTrue(response.data['is_stale'])
+        self.assertIn('outside the calibrated', response.data['quality_issue'])
     
     def test_create_reading_admin_only(self):
         """Test create reading requires admin."""
@@ -110,22 +151,47 @@ class WaterLevelAPITest(TestCase):
         """Test create reading by admin."""
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.post('/api/water-level/create/', {
-            'water_level_cm': 45,
+            'water_level_cm': 3.5,
+            'status': 'Normal',
+            'timestamp': timezone.now().isoformat(),
             'sensor_status': 'online',
             'gsm_status': 'connected'
-        })
+        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'Danger')
 
     def test_public_ingest_without_auth(self):
         """Test no-auth public ingest accepts Arduino sensor payloads."""
         response = self.client.post('/api/water-level/public-ingest/', {
-            'water_level': 48,
-            'status': 'Warning',
+            'water_level': 2.5,
+            'status': 'Danger',
             'sensor_status': 'online',
             'gsm_status': 'connected'
-        })
+        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(WaterLevelReading.objects.filter(water_level_cm=48).exists())
+        self.assertTrue(WaterLevelReading.objects.filter(
+            water_level_cm=2.5,
+            status='Warning',
+        ).exists())
+
+    def test_public_ingest_rejects_reading_above_calibrated_sensor_range(self):
+        response = self.client.post('/api/water-level/public-ingest/', {
+            'water_level_cm': 4.26,
+            'sensor_status': 'online',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(WaterLevelReading.objects.filter(water_level_cm=4.26).exists())
+
+    def test_empty_history_returns_no_synthetic_readings(self):
+        self.client.force_authenticate(user=self.user)
+        WaterLevelReading.objects.all().delete()
+
+        response = self.client.get('/api/water-level/history/?hours=24')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+        self.assertEqual(WaterLevelReading.objects.count(), 0)
     
     def test_statistics(self):
         """Test water level statistics."""

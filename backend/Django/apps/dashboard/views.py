@@ -5,7 +5,8 @@ from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from django.utils import timezone
-from datetime import timedelta
+from django.conf import settings
+from datetime import datetime, timedelta
 from django.db import models
 
 
@@ -14,12 +15,35 @@ def _threshold_band(status_value):
         return 'critical'
     if status_value in {'Alert', 'Warning'}:
         return 'warning'
+    if status_value in {'No Data', 'Out of Range'}:
+        return 'unknown'
     return 'normal'
 
 
-def _decision_support(reading, previous_reading=None):
-    status_value = reading.status if reading else 'Normal'
-    level = float(reading.water_level_cm) if reading else 0
+def _decision_support(reading, previous_reading=None, force_stale=False):
+    if not reading:
+        return {
+            'status_summary': 'No valid water-level telemetry is available.',
+            'status': 'No Data',
+            'band': 'unknown',
+            'risk_percentage': 0,
+            'data_confidence': 0,
+            'risk_metric_label': 'Operational risk score, not a statistical probability.',
+            'trend_change': None,
+            'trend_change_percentage': None,
+            'key_findings': ['No calibrated sensor reading is available.'],
+            'recommended_actions': ['Check the sensor connection and calibration.'],
+            'basis': 'No valid water-level telemetry is available.',
+            'is_stale': True,
+            'reading_age_seconds': None,
+        }
+
+    from apps.water_level.models import WaterLevelReading
+
+    status_value = WaterLevelReading.get_flood_status(reading.water_level_cm)
+    level = float(reading.water_level_cm)
+    reading_age = max(0, int((timezone.now() - reading.timestamp).total_seconds()))
+    is_stale = force_stale or reading_age > settings.READING_STALE_AFTER_SECONDS
     change = None
     change_percentage = None
     if reading and previous_reading:
@@ -41,8 +65,8 @@ def _decision_support(reading, previous_reading=None):
         elif change < 0:
             risk_percentage -= 5
     risk_percentage = max(0, min(100, risk_percentage))
-    data_confidence = 100 if reading and reading.sensor_status == 'online' else 50
-    if reading and reading.gsm_status != 'connected':
+    data_confidence = 0 if is_stale else 100 if reading.sensor_status == 'online' else 50
+    if not is_stale and reading.gsm_status != 'connected':
         data_confidence -= 20
 
     if status_value == 'Danger':
@@ -85,6 +109,18 @@ def _decision_support(reading, previous_reading=None):
                 f'({abs(change_percentage):.1f}%) from the previous reading.'
             )
 
+    if is_stale:
+        summary = f'Latest valid sensor reading is stale. {summary}'
+        findings.append('Verify the sensor connection; this value may no longer be current.')
+        actions.insert(0, 'Verify the sensor and obtain a fresh calibrated reading.')
+
+    at_calibrated_limit = level >= settings.SENSOR_MAX_LEVEL_CM
+    if at_calibrated_limit:
+        findings.append(
+            f'The reading is at the calibrated {settings.SENSOR_MAX_LEVEL_CM:g} cm limit; actual level may be higher.'
+        )
+        actions.insert(0, 'Verify the water level with a wider-range measurement.')
+
     return {
         'status_summary': summary,
         'status': status_value,
@@ -97,6 +133,9 @@ def _decision_support(reading, previous_reading=None):
         'key_findings': findings,
         'recommended_actions': actions,
         'basis': 'Recorded water-level telemetry and status values only.',
+        'is_stale': is_stale,
+        'reading_age_seconds': reading_age,
+        'at_calibrated_limit': at_calibrated_limit,
     }
 
 
@@ -107,14 +146,19 @@ def dashboard_telemetry_view(request):
     from apps.water_level.models import WaterLevelReading
 
     limit = min(max(int(request.query_params.get('limit', 25)), 1), 100)
-    readings = list(WaterLevelReading.objects.order_by('-timestamp')[:limit])
+    readings = WaterLevelReading.objects.filter(
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
+    ).order_by('-timestamp')[:limit]
     return Response([
         {
             'reading_id': str(reading.reading_id),
             'timestamp': reading.timestamp.isoformat(),
             'water_level_cm': float(reading.water_level_cm),
-            'status': reading.status,
-            'band': _threshold_band(reading.status),
+            'status': WaterLevelReading.get_flood_status(reading.water_level_cm),
+            'band': _threshold_band(WaterLevelReading.get_flood_status(reading.water_level_cm)),
+            'within_calibrated_range': True,
             'sensor_status': reading.sensor_status,
             'gsm_status': reading.gsm_status,
         }
@@ -128,10 +172,27 @@ def dashboard_decision_support_view(request):
     """Return deterministic admin guidance derived from the latest readings."""
     from apps.water_level.models import WaterLevelReading
 
-    readings = list(WaterLevelReading.objects.order_by('-timestamp')[:2])
+    latest_report = WaterLevelReading.objects.order_by('-timestamp').first()
+    readings = list(WaterLevelReading.objects.filter(
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
+    ).order_by('-timestamp')[:2])
     latest = readings[0] if readings else None
     previous = readings[1] if len(readings) > 1 else None
-    response = _decision_support(latest, previous)
+    invalid_report_is_newer = bool(
+        latest_report
+        and (
+            not 0 <= latest_report.water_level_cm <= settings.SENSOR_MAX_LEVEL_CM
+            or latest_report.sensor_status != 'online'
+        )
+        and (not latest or latest_report.timestamp > latest.timestamp)
+    )
+    response = _decision_support(latest, previous, force_stale=invalid_report_is_newer)
+    if invalid_report_is_newer:
+        response['key_findings'].append(
+            f'Latest reported value is outside the calibrated 0-{settings.SENSOR_MAX_LEVEL_CM:g} cm range.'
+        )
     response['timestamp'] = latest.timestamp.isoformat() if latest else None
     response['reading_id'] = str(latest.reading_id) if latest else None
     return Response(response)
@@ -144,10 +205,43 @@ def dashboard_water_level_forecast_view(request):
     from apps.water_level.models import WaterLevelReading
     from .forecasting import forecast_water_level
 
-    readings = WaterLevelReading.objects.order_by('timestamp').values_list(
+    readings = WaterLevelReading.objects.filter(
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
+    ).order_by('timestamp').values_list(
         'timestamp', 'water_level_cm'
     )
     return Response(forecast_water_level(readings))
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def dashboard_monthly_water_level_forecast_view(request):
+    """Return a same-month daily baseline using prior years' stored readings."""
+    from apps.water_level.models import WaterLevelReading
+    from .forecasting import forecast_month_profile
+
+    try:
+        year = int(request.query_params.get('year', ''))
+        month = int(request.query_params.get('month', ''))
+    except (TypeError, ValueError):
+        return Response({'detail': 'Valid year and month parameters are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not 2000 <= year <= 2100 or not 1 <= month <= 12:
+        return Response({'detail': 'Year must be 2000-2100 and month must be 1-12.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    forecast_start = timezone.make_aware(
+        datetime(year, month, 1),
+        timezone.get_current_timezone(),
+    )
+    readings = WaterLevelReading.objects.filter(
+        timestamp__lt=forecast_start,
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
+    ).order_by('timestamp').values_list('timestamp', 'water_level_cm')
+    return Response(forecast_month_profile(readings, year, month))
 
 
 @api_view(['GET'])
@@ -164,17 +258,39 @@ def dashboard_overview_view(request):
     from apps.sms.models import SMSLog
     from apps.predictions.models import Prediction
     
-    # Current water level
-    current_reading = WaterLevelReading.objects.order_by('-timestamp').first()
-    
-    # If no data exists, create sample data for demonstration
-    if not current_reading:
-        current_reading = WaterLevelReading.objects.create(
-            water_level_cm=15.5,
-            status='Normal',
-            sensor_status='online',
-            gsm_status='connected',
-            timestamp=timezone.now()
+    latest_report = WaterLevelReading.objects.order_by('-timestamp').first()
+    current_reading = WaterLevelReading.objects.filter(
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
+    ).order_by('-timestamp').first()
+    invalid_report_is_newer = bool(
+        latest_report
+        and (
+            not 0 <= latest_report.water_level_cm <= settings.SENSOR_MAX_LEVEL_CM
+            or latest_report.sensor_status != 'online'
+        )
+        and (not current_reading or latest_report.timestamp > current_reading.timestamp)
+    )
+    age_reference = current_reading or latest_report
+    reading_age = (
+        max(0, int((timezone.now() - age_reference.timestamp).total_seconds()))
+        if age_reference else None
+    )
+    reading_is_stale = (
+        not current_reading
+        or reading_age > settings.READING_STALE_AFTER_SECONDS
+        or invalid_report_is_newer
+        or current_reading.sensor_status != 'online'
+    )
+    data_quality_issue = None
+    if invalid_report_is_newer:
+        data_quality_issue = (
+            f'Latest sensor report is outside the calibrated 0-{settings.SENSOR_MAX_LEVEL_CM:g} cm range or is marked faulty.'
+        )
+    elif current_reading and current_reading.water_level_cm >= settings.SENSOR_MAX_LEVEL_CM:
+        data_quality_issue = (
+            f'Reading is at the calibrated {settings.SENSOR_MAX_LEVEL_CM:g} cm limit; actual level may be higher.'
         )
     
     # Active alerts
@@ -215,34 +331,35 @@ def dashboard_overview_view(request):
     
     # Latest prediction
     latest_prediction = Prediction.objects.order_by('-timestamp').first()
-    if not latest_prediction:
-        from apps.predictions.models import Prediction
-        latest_prediction = Prediction.objects.create(
-            reading=current_reading,
-            flood_probability=25.5,
-            severity='low',
-            alert_level='Normal',
-            confidence_score=85.0,
-            timestamp=timezone.now()
-        )
     
     # Get system status
     from django.conf import settings as django_settings
     system_status = {
-        'sensor_status': current_reading.sensor_status if current_reading else 'unknown',
+        'sensor_status': 'error' if invalid_report_is_newer else current_reading.sensor_status if current_reading else 'offline',
         'gsm_status': current_reading.gsm_status if current_reading else 'unknown',
         'ai_prediction_enabled': django_settings.AI_PREDICTION_ENABLED if hasattr(django_settings, 'AI_PREDICTION_ENABLED') else True,
         'sms_enabled': django_settings.SMS_ENABLED if hasattr(django_settings, 'SMS_ENABLED') else True,
         'last_reading_time': current_reading.timestamp if current_reading else None
     }
 
+    current_status = (
+        WaterLevelReading.get_flood_status(current_reading.water_level_cm)
+        if current_reading else 'No Data'
+    )
     data = {
         'current_water_level': {
-            'water_level_cm': float(current_reading.water_level_cm) if current_reading else 0,
-            'status': current_reading.status if current_reading else 'No Data',
+            'water_level_cm': float(current_reading.water_level_cm) if current_reading else None,
+            'status': current_status,
             'timestamp': current_reading.timestamp if current_reading else None,
-            'sensor_status': current_reading.sensor_status if current_reading else 'unknown',
-            'gsm_status': current_reading.gsm_status if current_reading else 'unknown'
+            'sensor_status': 'error' if invalid_report_is_newer else current_reading.sensor_status if current_reading else 'offline',
+            'gsm_status': current_reading.gsm_status if current_reading else 'unknown',
+            'is_stale': reading_is_stale,
+            'reading_age_seconds': reading_age,
+            'at_calibrated_limit': bool(
+                current_reading
+                and current_reading.water_level_cm >= settings.SENSOR_MAX_LEVEL_CM
+            ),
+            'quality_issue': data_quality_issue,
         },
         'alerts': {
             'active_count': active_alerts,
@@ -280,27 +397,16 @@ def dashboard_water_level_trend_view(request):
     - hours: Number of hours to look back (default: 24)
     """
     from apps.water_level.models import WaterLevelReading
-    import random
     
     hours = request.query_params.get('hours', 24)
     cutoff_time = timezone.now() - timedelta(hours=int(hours))
     
     readings = WaterLevelReading.objects.filter(
-        timestamp__gte=cutoff_time
+        timestamp__gte=cutoff_time,
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
     ).order_by('timestamp')
-    
-    # If no data exists, generate sample trend data
-    if not readings.exists():
-        base_time = timezone.now() - timedelta(hours=int(hours))
-        for i in range(int(hours)):
-            reading = WaterLevelReading.objects.create(
-                water_level_cm=round(random.uniform(10, 20), 1),
-                status='Normal' if random.random() > 0.3 else 'Alert',
-                sensor_status='online',
-                gsm_status='connected',
-                timestamp=base_time + timedelta(hours=i)
-            )
-        readings = WaterLevelReading.objects.filter(timestamp__gte=cutoff_time).order_by('timestamp')
     
     data = [
         {

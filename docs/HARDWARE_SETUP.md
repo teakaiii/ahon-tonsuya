@@ -270,13 +270,13 @@ In Arduino IDE, install these libraries via Library Manager:
 
 ### Sensor Calibration
 
-1. Place sensor at known water level
-2. Read analog value from Serial Monitor
-3. Calculate conversion formula
-4. Update firmware if needed:
-   ```cpp
-   currentWaterLevel = map(sensorValue, 0, 1023, 0, 100);
-   ```
+1. With the sensor dry, record its averaged ADC value as `SENSOR_RAW_DRY` (GSM sketch) or `RAW_DRY` (USB sketch).
+2. Submerge the active traces to their measured full span and record the ADC value as `SENSOR_RAW_WET` or `RAW_WET`.
+3. Set `SENSOR_SPAN_CM` to the measured physical span in centimetres. Keep the same dry value, wet value, and span in `scripts/serial_bridge.py` (`--raw-dry`, `--raw-full`, and `--span-cm`).
+4. Reflash the Arduino and verify several dry, midpoint, and full-span readings against a ruler before connecting operational alerts.
+5. Readings outside the calibrated ADC or centimetre range are marked faulty or rejected; the dashboard excludes them from the current value and trend chart, and flags an older fallback reading as stale.
+
+Do not map the 10-bit ADC range to an assumed 0-100 cm. Conductivity varies with the water, and this sensor only measures its calibrated active span. The default configuration is 0-600 ADC for 0-4 cm and must be replaced with site measurements if it differs.
 
 ### Threshold Configuration
 

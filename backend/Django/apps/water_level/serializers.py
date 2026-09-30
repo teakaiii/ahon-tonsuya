@@ -2,6 +2,7 @@
 Serializers for Water Level module.
 """
 from rest_framework import serializers
+from django.conf import settings
 from .models import WaterLevelReading
 
 
@@ -28,13 +29,19 @@ class WaterLevelReadingCreateSerializer(serializers.ModelSerializer):
             'water_level_cm', 'status', 'timestamp',
             'sensor_status', 'gsm_status'
         ]
+
+    def validate_water_level_cm(self, value):
+        maximum = settings.SENSOR_MAX_LEVEL_CM
+        if value < 0 or value > maximum:
+            raise serializers.ValidationError(
+                f'Water level must be between 0 and {maximum} cm for this calibrated sensor.'
+            )
+        return value
     
     def create(self, validated_data):
-        # Auto-determine status if not provided
-        if 'status' not in validated_data:
-            from django.conf import settings
-            water_level = validated_data['water_level_cm']
-            validated_data['status'] = WaterLevelReading.get_flood_status(water_level)
+        validated_data['status'] = WaterLevelReading.get_flood_status(
+            validated_data['water_level_cm']
+        )
         
         return WaterLevelReading.objects.create(**validated_data)
 

@@ -12,6 +12,8 @@ from django.conf import settings
 import logging
 import json
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +157,37 @@ class FirebaseService:
             from apps.water_level.models import WaterLevelReading
             
             # Parse Firebase data
-            water_level_cm = firebase_data.get('current_level')
-            status = firebase_data.get('status')
+            water_level_cm = firebase_data.get(
+                'current_level',
+                firebase_data.get('water_level_cm', firebase_data.get('water_level')),
+            )
             timestamp_str = firebase_data.get('timestamp')
             
-            if not all([water_level_cm, status, timestamp_str]):
+            if water_level_cm is None or timestamp_str is None:
                 logger.warning("Incomplete water level data from Firebase")
+                return None
+
+            try:
+                water_level_cm = Decimal(str(water_level_cm))
+            except (InvalidOperation, TypeError, ValueError):
+                logger.warning("Invalid water level data from Firebase: %r", water_level_cm)
+                return None
+
+            maximum = Decimal(str(settings.SENSOR_MAX_LEVEL_CM))
+            if not water_level_cm.is_finite() or not 0 <= water_level_cm <= maximum:
+                logger.warning(
+                    "Firebase water level is outside the calibrated 0-%s cm range: %s",
+                    maximum,
+                    water_level_cm,
+                )
                 return None
             
             # Parse timestamp
-            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            timestamp = datetime.fromisoformat(str(timestamp_str).replace('Z', '+00:00'))
+            if timezone.is_naive(timestamp):
+                timestamp = timezone.make_aware(timestamp)
+
+            status = WaterLevelReading.get_flood_status(water_level_cm)
             
             # Check if reading already exists
             existing = WaterLevelReading.objects.filter(
@@ -175,7 +198,8 @@ class FirebaseService:
             if existing:
                 logger.info(f"Reading already exists in PostgreSQL: {existing.reading_id}")
                 existing.firebase_synced = True
-                existing.save()
+                existing.status = status
+                existing.save(update_fields=['firebase_synced', 'status'])
                 return existing
             
             # Create new reading

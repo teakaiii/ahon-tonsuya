@@ -13,6 +13,7 @@ from .views import (
     dashboard_telemetry_view,
     dashboard_decision_support_view,
     dashboard_water_level_forecast_view,
+    dashboard_monthly_water_level_forecast_view,
 )
 
 urlpatterns = [
@@ -26,4 +27,5 @@ urlpatterns = [
     path('telemetry/', dashboard_telemetry_view, name='telemetry'),
     path('decision-support/', dashboard_decision_support_view, name='decision_support'),
     path('water-level-forecast/', dashboard_water_level_forecast_view, name='water_level_forecast'),
+    path('monthly-water-level-forecast/', dashboard_monthly_water_level_forecast_view, name='monthly_water_level_forecast'),
 ]

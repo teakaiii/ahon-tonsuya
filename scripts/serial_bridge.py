@@ -202,7 +202,7 @@ def raw_to_cm(raw, raw_dry, raw_full, span_cm):
     if span <= 0:
         return 0.0
     level = (raw - raw_dry) * span_cm / span
-    return round(max(0.0, min(999.99, level)), 2)
+    return round(max(0.0, min(span_cm, level)), 2)
 
 
 def parse_line(line, cfg):
@@ -219,7 +219,16 @@ def parse_line(line, cfg):
     # The plain-text sketch reports a raw ADC value; convert it here.
     match = RAW_LINE_RE.search(line)
     if match:
-        level = raw_to_cm(int(match.group(1)), cfg.raw_dry, cfg.raw_full, cfg.span_cm)
+        raw_value = int(match.group(1))
+        if not cfg.raw_dry <= raw_value <= cfg.raw_full:
+            logger.warning(
+                "Ignoring raw sensor value outside calibration (%s-%s): %s",
+                cfg.raw_dry,
+                cfg.raw_full,
+                raw_value,
+            )
+            return None
+        level = raw_to_cm(raw_value, cfg.raw_dry, cfg.raw_full, cfg.span_cm)
         return build_reading(level, derive_status(level), "online", cfg)
 
     if not line.startswith("{"):
@@ -241,8 +250,8 @@ def parse_line(line, cfg):
         logger.warning("Ignoring non-numeric water_level_cm: %r", data.get("water_level_cm"))
         return None
 
-    if math.isnan(level) or math.isinf(level) or not 0 <= level <= 999.99:
-        logger.warning("Ignoring out-of-range water level: %s", level)
+    if math.isnan(level) or math.isinf(level) or not 0 <= level <= cfg.span_cm:
+        logger.warning("Ignoring water level outside calibrated 0-%s cm range: %s", cfg.span_cm, level)
         return None
 
     status = data.get("status")
@@ -281,12 +290,11 @@ def derive_status(level, warning=2.0, danger=3.0):
     return "Normal"
 
 
-def simulated_lines(interval):
+def simulated_lines(interval, cfg):
     """Yield Arduino-shaped JSON lines without any hardware attached."""
     level = 1.0
     while True:
-        # Kept within the ~4 cm the real strip can actually reach.
-        level = max(0.0, min(4.2, level + random.uniform(-0.4, 0.45)))
+        level = max(0.0, min(cfg.span_cm, level + random.uniform(-0.4, 0.45)))
         yield json.dumps(
             {
                 "water_level_cm": round(level, 2),
@@ -375,6 +383,8 @@ def main():
         parser.error("--password is required (or set FLOODWATCH_PASSWORD)")
 
     cfg = BridgeConfig(args)
+    if cfg.raw_full <= cfg.raw_dry or cfg.span_cm <= 0:
+        parser.error("--raw-full must exceed --raw-dry and --span-cm must be positive")
     client = APIClient(args.api, args.username, args.password)
     try:
         client.login()
@@ -384,7 +394,7 @@ def main():
         return 1
 
     if args.simulate:
-        source = simulated_lines(min(args.min_interval, 5.0))
+        source = simulated_lines(min(args.min_interval, 5.0), cfg)
     else:
         port = args.port or autodetect_port()
         if not port:

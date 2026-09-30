@@ -4,6 +4,7 @@ Views for Water Level module.
 from rest_framework import generics, permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from django.conf import settings
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.utils import timezone
@@ -44,9 +45,16 @@ def public_water_level_ingest_view(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        maximum = Decimal(str(settings.SENSOR_MAX_LEVEL_CM))
+        if not water_level.is_finite() or water_level < 0 or water_level > maximum:
+            return Response(
+                {'error': f'water_level_cm must be between 0 and {maximum} cm for this calibrated sensor.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         sensor_status = payload.get('sensor_status', 'online')
         gsm_status = payload.get('gsm_status', 'connected')
-        status_value = payload.get('status') or WaterLevelReading.get_flood_status(water_level)
+        status_value = WaterLevelReading.get_flood_status(water_level)
 
         timestamp_value = payload.get('timestamp')
         if timestamp_value:
@@ -57,7 +65,10 @@ def public_water_level_ingest_view(request):
                 else:
                     timestamp = timestamp.astimezone(timezone.utc)
             except ValueError:
-                timestamp = timezone.now()
+                return Response(
+                    {'error': 'timestamp must be a valid ISO 8601 datetime.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         else:
             timestamp = timezone.now()
 
@@ -139,6 +150,22 @@ def current_water_level_view(request):
                     serializer = CurrentWaterLevelSerializer(synced_reading)
                     response_data = serializer.data
                     response_data['source'] = 'firebase_sensor'
+                    response_data['status'] = WaterLevelReading.get_flood_status(
+                        synced_reading.water_level_cm
+                    )
+                    reading_age = max(0, int((timezone.now() - synced_reading.timestamp).total_seconds()))
+                    response_data['reading_age_seconds'] = reading_age
+                    response_data['is_stale'] = (
+                        reading_age > settings.READING_STALE_AFTER_SECONDS
+                        or synced_reading.sensor_status != 'online'
+                    )
+                    response_data['at_calibrated_limit'] = (
+                        synced_reading.water_level_cm >= settings.SENSOR_MAX_LEVEL_CM
+                    )
+                    if response_data['at_calibrated_limit']:
+                        response_data['quality_issue'] = (
+                            f'Reading is at the calibrated {settings.SENSOR_MAX_LEVEL_CM:g} cm limit; actual level may be higher.'
+                        )
                     return Response(response_data)
         except Exception as firebase_error:
             import logging
@@ -146,20 +173,61 @@ def current_water_level_view(request):
                 'Live Firebase reading unavailable: %s', firebase_error
             )
 
-        reading = WaterLevelReading.objects.order_by('-timestamp').first()
+        latest_report = WaterLevelReading.objects.order_by('-timestamp').first()
+        reading = WaterLevelReading.objects.filter(
+            water_level_cm__gte=0,
+            water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+            sensor_status='online',
+        ).order_by('-timestamp').first()
         
         if not reading:
-            # Create sample reading if none exists
-            reading = WaterLevelReading.objects.create(
-                water_level_cm=15.5,
-                status='Normal',
-                sensor_status='online',
-                gsm_status='connected'
-            )
+            return Response({
+                'reading_id': None,
+                'water_level_cm': None,
+                'status': 'No Data',
+                'timestamp': None,
+                'sensor_status': 'offline',
+                'gsm_status': 'unknown',
+                'firebase_synced': False,
+                'source': 'none',
+                'is_stale': True,
+                'reading_age_seconds': None,
+                'at_calibrated_limit': False,
+                'quality_issue': (
+                    f'Latest sensor report is outside the calibrated 0-{settings.SENSOR_MAX_LEVEL_CM:g} cm range or is marked faulty.'
+                    if latest_report else None
+                ),
+            })
         
         serializer = CurrentWaterLevelSerializer(reading)
         response_data = serializer.data
+        response_data['status'] = WaterLevelReading.get_flood_status(reading.water_level_cm)
         response_data['source'] = 'database'
+        reading_age = max(0, int((timezone.now() - reading.timestamp).total_seconds()))
+        response_data['reading_age_seconds'] = reading_age
+        invalid_report_is_newer = bool(
+            latest_report
+            and latest_report.timestamp > reading.timestamp
+            and (
+                not 0 <= latest_report.water_level_cm <= settings.SENSOR_MAX_LEVEL_CM
+                or latest_report.sensor_status != 'online'
+            )
+        )
+        response_data['is_stale'] = (
+            reading_age > settings.READING_STALE_AFTER_SECONDS
+            or invalid_report_is_newer
+        )
+        response_data['at_calibrated_limit'] = (
+            reading.water_level_cm >= settings.SENSOR_MAX_LEVEL_CM
+        )
+        if invalid_report_is_newer:
+            response_data['quality_issue'] = (
+                f'Latest sensor report is outside the calibrated 0-{settings.SENSOR_MAX_LEVEL_CM:g} cm range or is marked faulty.'
+            )
+        elif response_data['at_calibrated_limit']:
+            response_data['quality_issue'] = (
+                f'Reading is at the calibrated {settings.SENSOR_MAX_LEVEL_CM:g} cm limit; actual level may be higher.'
+            )
         return Response(response_data)
     except Exception as e:
         return Response(
@@ -196,21 +264,6 @@ def water_level_history_view(request):
             queryset = queryset.filter(timestamp__gte=cutoff_time)
         
         readings = queryset.order_by('timestamp')
-        
-        # If no data exists, generate sample historical data
-        if not readings.exists():
-            import random
-            from datetime import timedelta
-            base_time = timezone.now() - timedelta(hours=int(hours))
-            for i in range(int(hours)):
-                reading = WaterLevelReading.objects.create(
-                    water_level_cm=round(random.uniform(10, 20), 1),
-                    status='Normal' if random.random() > 0.3 else 'Alert',
-                    sensor_status='online',
-                    gsm_status='connected',
-                    timestamp=base_time + timedelta(hours=i)
-                )
-            readings = WaterLevelReading.objects.filter(timestamp__gte=cutoff_time).order_by('timestamp')
         
         serializer = WaterLevelReadingSerializer(readings, many=True)
         

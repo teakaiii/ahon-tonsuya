@@ -75,6 +75,7 @@ void loop() {
 
   int waterValue = readWaterSensorRaw();
   float waterLevelCm = rawToWaterLevelCm(waterValue);
+  const char *sensorStatusStr = waterValue <= SENSOR_RAW_WET ? "online" : "error";
 
   Serial.print(F("Current Sensor ADC: "));
   Serial.print(waterValue);
@@ -133,7 +134,7 @@ void loop() {
     }
   }
 
-  printSerialTelemetry(waterLevelCm, currentStatus);
+  printSerialTelemetry(waterLevelCm, currentStatus, sensorStatusStr);
 
   if (sendCriticalSms) {
     pendingSmsState = 2;
@@ -186,7 +187,9 @@ void loop() {
     jsonPayload += String(waterLevelCm, 1);
     jsonPayload += F(",\"status\":\"");
     jsonPayload += currentStatus;
-    jsonPayload += F("\",\"sensor_status\":\"online\",\"gsm_status\":\"");
+    jsonPayload += F("\",\"sensor_status\":\"");
+    jsonPayload += sensorStatusStr;
+    jsonPayload += F("\",\"gsm_status\":\"");
     jsonPayload += gsmStatusStr;
     jsonPayload += F("\"}");
 
@@ -304,12 +307,14 @@ float rawToWaterLevelCm(int rawValue) {
   return levelCm;
 }
 
-void printSerialTelemetry(float waterLevelCm, const char *currentStatus) {
+void printSerialTelemetry(float waterLevelCm, const char *currentStatus, const char *sensorStatus) {
   Serial.print(F("[DEBUG] Payload: {\"water_level_cm\":"));
   Serial.print(waterLevelCm, 1);
   Serial.print(F(",\"status\":\""));
   Serial.print(currentStatus);
-  Serial.print(F("\",\"sensor_status\":\"online\",\"gsm_status\":\""));
+  Serial.print(F("\",\"sensor_status\":\""));
+  Serial.print(sensorStatus);
+  Serial.print(F("\",\"gsm_status\":\""));
   Serial.print(isGprsConnected ? F("connected") : F("disconnected"));
   Serial.println(F("\"}"));
 }

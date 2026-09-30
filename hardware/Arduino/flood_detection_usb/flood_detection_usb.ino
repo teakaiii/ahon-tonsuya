@@ -52,17 +52,14 @@ const float SENSOR_SPAN_CM = 4.0;    // physical length represented by RAW_WET
 // ==================== FLOOD THRESHOLDS (cm) ====================
 // Keep these in sync with the Django settings of the same name.
 
-const float ALERT_THRESHOLD   = 45.0;
-const float WARNING_THRESHOLD = 60.0;
-const float DANGER_THRESHOLD  = 75.0;
+const float ALERT_THRESHOLD   = 2.0;
+const float WARNING_THRESHOLD = 2.0;
+const float DANGER_THRESHOLD  = 3.0;
 
 // ==================== TIMING ====================
 
 const unsigned long READING_INTERVAL = 5000;  // ms between readings
 const int           SAMPLE_COUNT     = 10;    // samples averaged per reading
-
-// water_level_cm is DecimalField(max_digits=5, decimal_places=2) in Django.
-const float MAX_LEVEL_CM = 999.99;
 
 unsigned long lastReadingTime = 0;
 
@@ -125,8 +122,8 @@ float rawToCentimetres(int raw) {
   if (level < 0.0) {
     level = 0.0;
   }
-  if (level > MAX_LEVEL_CM) {
-    level = MAX_LEVEL_CM;
+  if (level > SENSOR_SPAN_CM) {
+    level = SENSOR_SPAN_CM;
   }
   return level;
 }
@@ -161,7 +158,7 @@ bool isSensorPlausible(int raw) {
   // A dry board legitimately reads ~0, so only a pinned-high value indicates a
   // fault (signal shorted to VCC). A disconnected sensor also reads near 0 and
   // is genuinely indistinguishable from "dry" on this hardware.
-  return raw < 1023;
+  return raw <= RAW_WET;
 }
 
 void updateStatusLED(float level) {

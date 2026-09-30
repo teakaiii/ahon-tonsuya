@@ -8,10 +8,13 @@ import {
   CircularProgress,
   Alert,
   Chip,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
+  TextField,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
 } from '@mui/material'
 import {
   BarChart,
@@ -26,16 +29,26 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  ReferenceArea,
   ResponsiveContainer,
 } from 'recharts'
 import api from '../services/api'
 
 const COLORS = ['#1976d2', '#dc004e', '#ed6c02', '#2e7d32', '#9c27b0']
+const formatForecastMetric = (value) => value == null ? '-' : Number(value).toFixed(3)
+
+const getNextMonthValue = () => {
+  const today = new Date()
+  const month = today.getMonth() + 1
+  const year = today.getFullYear() + (month === 12 ? 1 : 0)
+  return `${year}-${String(month === 12 ? 1 : month + 1).padStart(2, '0')}`
+}
 
 const Analytics = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [timeRange, setTimeRange] = useState(24)
+  const [timeRange] = useState(24)
+  const [forecastMonth, setForecastMonth] = useState(getNextMonthValue)
   
   const [waterLevelTrend, setWaterLevelTrend] = useState([])
   const [currentWaterLevel, setCurrentWaterLevel] = useState(null)
@@ -43,6 +56,8 @@ const Analytics = () => {
   const [smsStatistics, setSmsStatistics] = useState([])
   const [decisionSupport, setDecisionSupport] = useState(null)
   const [waterLevelForecast, setWaterLevelForecast] = useState(null)
+  const [monthlyForecast, setMonthlyForecast] = useState(null)
+  const [monthlyForecastLoading, setMonthlyForecastLoading] = useState(true)
   const [residentDistribution, setResidentDistribution] = useState([])
 
   useEffect(() => {
@@ -69,6 +84,7 @@ const Analytics = () => {
         fetchSMSStatistics(),
         fetchDecisionSupport(),
         fetchWaterLevelForecast(),
+        fetchMonthlyForecast(),
         fetchResidentDistribution()
       ])
       setError(null)
@@ -145,6 +161,23 @@ const Analytics = () => {
     }
   }
 
+  const fetchMonthlyForecast = async (selectedMonth = forecastMonth) => {
+    if (!selectedMonth) return
+    const [year, month] = selectedMonth.split('-')
+    setMonthlyForecastLoading(true)
+    try {
+      const response = await api.get('/api/dashboard/monthly-water-level-forecast/', {
+        params: { year, month: Number(month) },
+      })
+      setMonthlyForecast(response.data)
+    } catch (err) {
+      console.error('Failed to fetch monthly water-level forecast:', err)
+      setMonthlyForecast({ available: false, reason: 'Monthly forecast could not be loaded.' })
+    } finally {
+      setMonthlyForecastLoading(false)
+    }
+  }
+
   const fetchResidentDistribution = async () => {
     try {
       const response = await api.get('/api/dashboard/resident-distribution/')
@@ -173,19 +206,22 @@ const Analytics = () => {
             System performance and data analysis
           </Typography>
         </Box>
-        <FormControl size="small" sx={{ minWidth: 150 }}>
-          <InputLabel>Time Range</InputLabel>
-          <Select
-            value={timeRange}
-            label="Time Range"
-            onChange={(e) => setTimeRange(e.target.value)}
-          >
-            <MenuItem value={1}>1 Hour</MenuItem>
-            <MenuItem value={6}>6 Hours</MenuItem>
-            <MenuItem value={24}>24 Hours</MenuItem>
-            <MenuItem value={168}>1 Week</MenuItem>
-          </Select>
-        </FormControl>
+        <TextField
+          label="Forecast month"
+          type="month"
+          size="small"
+          value={forecastMonth}
+          inputProps={{ min: getNextMonthValue() }}
+          onChange={(event) => {
+            const selectedMonth = event.target.value
+            if (!selectedMonth || selectedMonth >= getNextMonthValue()) {
+              setForecastMonth(selectedMonth)
+              fetchMonthlyForecast(selectedMonth)
+            }
+          }}
+          InputLabelProps={{ shrink: true }}
+          sx={{ minWidth: 180 }}
+        />
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
@@ -199,21 +235,45 @@ const Analytics = () => {
                 <Box>
                   <Box display="flex" alignItems="center" gap={1} mb={1}>
                     <Typography variant="h6">Live Water Level</Typography>
-                    <Chip label="LIVE" color="success" size="small" />
+                    <Chip
+                      label={currentWaterLevel?.water_level_cm == null
+                        ? 'NO DATA'
+                        : currentWaterLevel?.is_stale
+                          ? 'STALE'
+                          : currentWaterLevel?.quality_issue
+                            ? 'CHECK SENSOR'
+                            : 'LIVE'}
+                      color={currentWaterLevel?.water_level_cm == null || currentWaterLevel?.is_stale || currentWaterLevel?.quality_issue ? 'warning' : 'success'}
+                      size="small"
+                    />
                   </Box>
                   <Typography variant="h2" color="primary">
-                    {currentWaterLevel?.water_level_cm ?? '--'} cm
+                    {currentWaterLevel?.water_level_cm == null
+                      ? '-- cm'
+                      : `${currentWaterLevel?.at_calibrated_limit ? '≥' : ''}${Number(currentWaterLevel.water_level_cm).toFixed(2)} cm`}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Last reading: {currentWaterLevel?.timestamp
+                    {currentWaterLevel?.is_stale ? 'Last valid reading: ' : 'Last reading: '}{currentWaterLevel?.timestamp
                       ? new Date(currentWaterLevel.timestamp).toLocaleString()
                       : 'Waiting for sensor data'}
                   </Typography>
                 </Box>
                 <Box textAlign={{ xs: 'left', sm: 'right' }}>
                   <Chip
-                    label={currentWaterLevel?.status || 'Unknown'}
-                    color={currentWaterLevel?.status === 'Danger' ? 'error' : currentWaterLevel?.status === 'Warning' ? 'warning' : 'success'}
+                    label={currentWaterLevel?.is_stale
+                      ? 'Stale'
+                      : currentWaterLevel?.at_calibrated_limit
+                        ? 'At sensor limit'
+                        : currentWaterLevel?.quality_issue
+                          ? 'Check sensor'
+                          : currentWaterLevel?.status || 'No Data'}
+                    color={currentWaterLevel?.is_stale || currentWaterLevel?.quality_issue || currentWaterLevel?.status === 'No Data'
+                      ? 'warning'
+                      : currentWaterLevel?.status === 'Danger'
+                        ? 'error'
+                        : currentWaterLevel?.status === 'Warning'
+                          ? 'warning'
+                          : 'success'}
                     sx={{ mb: 1 }}
                   />
                   <Typography variant="body2" color="text.secondary">
@@ -224,6 +284,11 @@ const Analytics = () => {
                   </Typography>
                 </Box>
               </Box>
+              {(currentWaterLevel?.is_stale || currentWaterLevel?.quality_issue) && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  {currentWaterLevel.quality_issue || 'The latest valid reading is stale.'} Verify the sensor before relying on this value.
+                </Alert>
+              )}
             </CardContent>
           </Card>
         </Grid>
@@ -379,7 +444,115 @@ const Analytics = () => {
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Water-Level Regression Forecast
+                Monthly Water-Level Forecast
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Daily projection trained on all prior valid readings; method selected using a chronological holdout.
+              </Typography>
+              {monthlyForecastLoading ? (
+                <Box display="flex" alignItems="center" gap={1} minHeight={120}>
+                  <CircularProgress size={20} />
+                  <Typography variant="body2" color="text.secondary">Loading monthly samples...</Typography>
+                </Box>
+              ) : (
+                <>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <LineChart data={monthlyForecast?.points || []} margin={{ top: 8, right: 18, left: 4, bottom: 12 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <ReferenceArea y1={0} y2={2} fill="#2e7d32" fillOpacity={0.08} />
+                      <ReferenceArea y1={2} y2={3} fill="#ed6c02" fillOpacity={0.1} />
+                      <ReferenceArea y1={3} y2={4} fill="#d32f2f" fillOpacity={0.08} />
+                      <XAxis dataKey="day" tick={{ fontSize: 11 }} label={{ value: 'Day of month', position: 'insideBottom', offset: -6 }} />
+                      <YAxis domain={[0, 4]} ticks={[0, 1, 2, 3, 4]} tick={{ fontSize: 11 }} />
+                      <Tooltip
+                        labelFormatter={(day) => `${monthlyForecast.month_label} ${day}, ${monthlyForecast.year}`}
+                        formatter={(value) => [value == null ? 'No forecast' : `${Number(value).toFixed(2)} cm`, 'Forecast']}
+                      />
+                      <Legend />
+                      <Line type="monotone" dataKey="forecast_cm" name="Forecast water level" stroke="#1565c0" strokeWidth={2.5} dot={{ r: 2 }} connectNulls={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: -0.5, mb: 1 }}>
+                    Thresholds: Normal &lt;2 cm · Warning 2–&lt;3 cm · Critical/Danger ≥3 cm
+                  </Typography>
+                  {monthlyForecast?.horizon_metrics && (
+                    <TableContainer sx={{ mb: 1, overflowX: 'auto' }}>
+                      <Table size="small" aria-label="Forecast backtest errors by horizon" sx={{ minWidth: 620 }}>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Horizon</TableCell>
+                            <TableCell align="right">Examples</TableCell>
+                            <TableCell align="right">Trend MAE / RMSE (cm)</TableCell>
+                            <TableCell align="right">7-reading average MAE / RMSE (cm)</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {Object.values(monthlyForecast.horizon_metrics)
+                            .sort((left, right) => left.horizon_days - right.horizon_days)
+                            .map((metric) => (
+                              <TableRow key={metric.horizon_days}>
+                                <TableCell>
+                                  {metric.horizon_days} days
+                                  {metric.horizon_days === monthlyForecast.forecast_horizon_days ? ' (month)' : ''}
+                                </TableCell>
+                                <TableCell align="right">{metric.sample_count}</TableCell>
+                                <TableCell align="right">
+                                  {formatForecastMetric(metric.trend_mae_cm)} / {formatForecastMetric(metric.trend_rmse_cm)}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {formatForecastMetric(metric.persistence_mae_cm)} / {formatForecastMetric(metric.persistence_rmse_cm)}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
+                  {monthlyForecast?.available ? (
+                    <>
+                      <Grid container spacing={1} sx={{ mt: 0.25, mb: 1 }}>
+                        <Grid item xs={12} sm={4}>
+                          <Typography variant="caption" color="text.secondary">SELECTED METHOD</Typography>
+                          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                            {monthlyForecast.method === 'linear_trend' ? 'Linear trend' : 'Recent 7-day average'}
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} sm={4}>
+                          <Typography variant="caption" color="text.secondary">BACKTEST MAE / RMSE</Typography>
+                          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                            {monthlyForecast.validation_mae_cm} / {monthlyForecast.validation_rmse_cm} cm
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={12} sm={4}>
+                          <Typography variant="caption" color="text.secondary">MONTH-LENGTH BACKTEST</Typography>
+                          <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                            {monthlyForecast.forecast_horizon_days}-day horizon; {monthlyForecast.validation_days} examples
+                          </Typography>
+                        </Grid>
+                      </Grid>
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                        At the {monthlyForecast.forecast_horizon_days}-day horizon, linear trend MAE is {monthlyForecast.trend_mae_cm} cm and the recent 7-reading average MAE is {monthlyForecast.persistence_mae_cm} cm.
+                      </Typography>
+                      <Alert severity="warning">
+                        Final projection uses {monthlyForecast.training_days} days of readings. Method selection uses {monthlyForecast.validation_days} historical examples from {monthlyForecast.validation_start} to {monthlyForecast.validation_end} at the full-month horizon. Accuracy is not a guarantee of future conditions. {monthlyForecast.safety_note}
+                      </Alert>
+                    </>
+                  ) : (
+                    <Alert severity="info" sx={{ mt: 1 }}>
+                      {monthlyForecast?.reason || 'No validated monthly forecast is available for this selection.'}
+                    </Alert>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Short-Term Water-Level Regression Forecast
               </Typography>
               {waterLevelForecast?.available ? (
                 <>
