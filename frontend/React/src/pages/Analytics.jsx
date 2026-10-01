@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import {
   Box,
   Grid,
@@ -19,9 +19,8 @@ import {
 import {
   BarChart,
   Bar,
-  PieChart,
-  Pie,
-  Cell,
+  ScatterChart,
+  Scatter,
   LineChart,
   Line,
   XAxis,
@@ -34,8 +33,12 @@ import {
 } from 'recharts'
 import api from '../services/api'
 
-const COLORS = ['#1976d2', '#dc004e', '#ed6c02', '#2e7d32', '#9c27b0']
 const formatForecastMetric = (value) => value == null ? '-' : Number(value).toFixed(3)
+const formatChartTime = (value) => new Date(value).toLocaleTimeString([], {
+  hour: 'numeric',
+  minute: '2-digit',
+})
+const formatStreetLabel = (value) => String(value ?? '').replace(/^(purok|street)\b/i, 'Street')
 
 const getNextMonthValue = () => {
   const today = new Date()
@@ -53,12 +56,24 @@ const Analytics = () => {
   const [waterLevelTrend, setWaterLevelTrend] = useState([])
   const [currentWaterLevel, setCurrentWaterLevel] = useState(null)
   const [alertHistory, setAlertHistory] = useState([])
-  const [smsStatistics, setSmsStatistics] = useState([])
   const [decisionSupport, setDecisionSupport] = useState(null)
   const [waterLevelForecast, setWaterLevelForecast] = useState(null)
   const [monthlyForecast, setMonthlyForecast] = useState(null)
   const [monthlyForecastLoading, setMonthlyForecastLoading] = useState(true)
   const [residentDistribution, setResidentDistribution] = useState([])
+  const streetDistribution = useMemo(() => {
+    const totals = new Map()
+    residentDistribution.forEach((item) => {
+      const label = formatStreetLabel(item.purok_zone)
+      const key = label.toLowerCase()
+      const current = totals.get(key)
+      totals.set(key, {
+        purok_zone: label,
+        count: (current?.count || 0) + Number(item.count || 0),
+      })
+    })
+    return Array.from(totals.values())
+  }, [residentDistribution])
 
   useEffect(() => {
     fetchAllAnalytics()
@@ -81,7 +96,6 @@ const Analytics = () => {
         fetchCurrentWaterLevel(),
         fetchWaterLevelTrend(),
         fetchAlertHistory(),
-        fetchSMSStatistics(),
         fetchDecisionSupport(),
         fetchWaterLevelForecast(),
         fetchMonthlyForecast(),
@@ -122,23 +136,20 @@ const Analytics = () => {
   const fetchAlertHistory = async () => {
     try {
       const response = await api.get(`/api/dashboard/alert-history/?hours=${timeRange}`)
-      const formattedData = response.data.map(item => ({
-        time: new Date(item.timestamp).toLocaleTimeString(),
-        level: item.alert_level,
-        active: item.is_active ? 1 : 0
-      }))
+      const formattedData = response.data.map(item => {
+        const level = item.alert_level
+          || ({ normal: 'Normal', warning: 'Warning', critical: 'Critical' }[item.band] || 'Normal')
+        return {
+          time: formatChartTime(item.timestamp),
+          x: new Date(item.timestamp).getTime(),
+          level,
+          y: level === 'Critical' ? 2 : level === 'Warning' ? 1 : 0,
+          active: item.is_active ? 1 : 0,
+        }
+      })
       setAlertHistory(formattedData)
     } catch (err) {
       console.error('Failed to fetch alert history:', err)
-    }
-  }
-
-  const fetchSMSStatistics = async () => {
-    try {
-      const response = await api.get(`/api/dashboard/sms-statistics/?hours=${timeRange}`)
-      setSmsStatistics(response.data)
-    } catch (err) {
-      console.error('Failed to fetch SMS statistics:', err)
     }
   }
 
@@ -320,36 +331,6 @@ const Analytics = () => {
           </Card>
         </Grid>
 
-        {/* SMS Statistics Chart */}
-        <Grid item xs={12} md={4}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                SMS Delivery Status
-              </Typography>
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie
-                    data={smsStatistics}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={(entry) => `${entry.delivery_status}: ${entry.count}`}
-                    outerRadius={80}
-                    fill="#8884d8"
-                    dataKey="count"
-                  >
-                    {smsStatistics.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </Grid>
-
         {/* Alert History Chart */}
         <Grid item xs={12} md={6}>
           <Card>
@@ -357,15 +338,37 @@ const Analytics = () => {
               <Typography variant="h6" gutterBottom>
                 Alert History
               </Typography>
+              <Typography variant="body2" color="text.secondary" gutterBottom>
+                Water status from telemetry readings
+              </Typography>
               <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={alertHistory}>
+                <ScatterChart>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis />
-                  <Tooltip />
+                  <XAxis
+                    dataKey="x"
+                    type="number"
+                    domain={['dataMin', 'dataMax']}
+                    tickCount={5}
+                    minTickGap={50}
+                    tickFormatter={formatChartTime}
+                  />
+                  <YAxis
+                    dataKey="y"
+                    type="number"
+                    domain={[0, 2]}
+                    ticks={[0, 1, 2]}
+                    tickFormatter={(value) => ['Normal', 'Warning', 'Critical'][value]}
+                  />
+                  <Tooltip
+                    cursor={{ strokeDasharray: '3 3' }}
+                    formatter={(_, name, item) => [item.payload.level, name]}
+                    labelFormatter={formatChartTime}
+                  />
                   <Legend />
-                  <Bar dataKey="active" fill="#dc004e" name="Active Alerts" />
-                </BarChart>
+                  <Scatter name="Normal" data={alertHistory.filter((item) => item.level === 'Normal')} fill="#2e7d32" />
+                  <Scatter name="Warning" data={alertHistory.filter((item) => item.level === 'Warning')} fill="#ed6c02" />
+                  <Scatter name="Critical" data={alertHistory.filter((item) => item.level === 'Critical')} fill="#d32f2f" />
+                </ScatterChart>
               </ResponsiveContainer>
             </CardContent>
           </Card>
@@ -376,14 +379,14 @@ const Analytics = () => {
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Resident Distribution by Purok
+                Resident Distribution by Street
               </Typography>
               <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={residentDistribution} layout="vertical">
+                <BarChart data={streetDistribution} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis type="number" />
-                  <YAxis dataKey="purok_zone" type="category" width={100} />
-                  <Tooltip />
+                  <XAxis type="number" hide />
+                  <YAxis dataKey="purok_zone" type="category" width={100} tickFormatter={formatStreetLabel} />
+                  <Tooltip labelFormatter={formatStreetLabel} />
                   <Legend />
                   <Bar dataKey="count" fill="#1976d2" name="Residents" />
                 </BarChart>

@@ -20,6 +20,19 @@ def _threshold_band(status_value):
     return 'normal'
 
 
+def _telemetry_status(reading):
+    from apps.water_level.models import WaterLevelReading
+
+    status = WaterLevelReading.get_flood_status(reading.water_level_cm)
+    band = _threshold_band(status)
+    alert_level = {
+        'normal': 'Normal',
+        'warning': 'Warning',
+        'critical': 'Critical',
+    }.get(band, 'Normal')
+    return status, band, alert_level
+
+
 def _decision_support(reading, previous_reading=None, force_stale=False):
     if not reading:
         return {
@@ -156,8 +169,9 @@ def dashboard_telemetry_view(request):
             'reading_id': str(reading.reading_id),
             'timestamp': reading.timestamp.isoformat(),
             'water_level_cm': float(reading.water_level_cm),
-            'status': WaterLevelReading.get_flood_status(reading.water_level_cm),
-            'band': _threshold_band(WaterLevelReading.get_flood_status(reading.water_level_cm)),
+            'status': (status := _telemetry_status(reading))[0],
+            'band': status[1],
+            'alert_level': status[2],
             'within_calibrated_range': True,
             'sensor_status': reading.sensor_status,
             'gsm_status': reading.gsm_status,
@@ -423,56 +437,30 @@ def dashboard_water_level_trend_view(request):
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def dashboard_alert_history_view(request):
-    """
-    API endpoint to get alert history for charts.
-    Query parameters:
-    - hours: Number of hours to look back (default: 24)
-    """
-    from apps.alerts.models import FloodAlert
-    import random
+    """Return telemetry status history for the alert history chart."""
+    from apps.water_level.models import WaterLevelReading
     
     hours = request.query_params.get('hours', 24)
     cutoff_time = timezone.now() - timedelta(hours=int(hours))
     
-    alerts = FloodAlert.objects.filter(
-        timestamp__gte=cutoff_time
+    readings = WaterLevelReading.objects.filter(
+        timestamp__gte=cutoff_time,
+        water_level_cm__gte=0,
+        water_level_cm__lte=settings.SENSOR_MAX_LEVEL_CM,
+        sensor_status='online',
     ).order_by('timestamp')
-    
-    # If no data exists, generate sample alert data
-    if not alerts.exists():
-        from apps.water_level.models import WaterLevelReading
-        base_time = timezone.now() - timedelta(hours=int(hours))
-        for i in range(int(hours)):
-            if random.random() > 0.8:  # 20% chance of alert
-                # Get or create a reading for this alert
-                reading = WaterLevelReading.objects.filter(
-                    timestamp__lte=base_time + timedelta(hours=i)
-                ).first()
-                if not reading:
-                    reading = WaterLevelReading.objects.create(
-                        water_level_cm=15.5,
-                        status='Normal',
-                        sensor_status='online',
-                        gsm_status='connected',
-                        timestamp=base_time + timedelta(hours=i)
-                    )
-                alert = FloodAlert.objects.create(
-                    reading=reading,
-                    alert_level=random.choice(['Alert', 'Warning', 'Danger']),
-                    is_active=random.random() > 0.5,
-                    message=f'Sample alert {i}',
-                    timestamp=base_time + timedelta(hours=i)
-                )
-        alerts = FloodAlert.objects.filter(timestamp__gte=cutoff_time).order_by('timestamp')
-    
-    data = [
-        {
-            'timestamp': alert.timestamp.isoformat(),
-            'alert_level': alert.alert_level,
-            'is_active': alert.is_active
-        }
-        for alert in alerts
-    ]
+
+    data = []
+    for reading in readings:
+        status, band, alert_level = _telemetry_status(reading)
+        data.append({
+            'reading_id': str(reading.reading_id),
+            'timestamp': reading.timestamp.isoformat(),
+            'status': status,
+            'band': band,
+            'alert_level': alert_level,
+            'is_active': alert_level != 'Normal',
+        })
     
     return Response(data)
 

@@ -8,6 +8,7 @@ from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.utils import timezone
+from django.shortcuts import get_object_or_404
 from datetime import timedelta, date
 from .models import Report
 from .serializers import (
@@ -96,6 +97,43 @@ def _report_band(status_value):
     return 'Normal / Low'
 
 
+def _summarize_daily_readings(readings):
+    daily = {}
+    for reading in readings:
+        day = timezone.localtime(reading.timestamp).date()
+        entry = daily.setdefault(day, {
+            'date': day,
+            'first_timestamp': reading.timestamp,
+            'last_timestamp': reading.timestamp,
+            'levels': [],
+            'latest_level': reading.water_level_cm,
+            'latest_status': reading.status,
+            'sensor_status': reading.sensor_status,
+            'gsm_status': reading.gsm_status,
+            'status_counts': {'Normal': 0, 'Alert': 0, 'Warning': 0, 'Danger': 0},
+        })
+        entry['levels'].append(float(reading.water_level_cm))
+        entry['status_counts'][reading.status] = entry['status_counts'].get(reading.status, 0) + 1
+        if reading.timestamp < entry['first_timestamp']:
+            entry['first_timestamp'] = reading.timestamp
+        if reading.timestamp >= entry['last_timestamp']:
+            entry['last_timestamp'] = reading.timestamp
+            entry['latest_level'] = reading.water_level_cm
+            entry['latest_status'] = reading.status
+            entry['sensor_status'] = reading.sensor_status
+            entry['gsm_status'] = reading.gsm_status
+
+    summaries = []
+    for entry in daily.values():
+        levels = entry.pop('levels')
+        entry['minimum_level'] = min(levels)
+        entry['maximum_level'] = max(levels)
+        entry['average_level'] = sum(levels) / len(levels)
+        entry['record_count'] = len(levels)
+        summaries.append(entry)
+    return sorted(summaries, key=lambda item: item['date'], reverse=True)
+
+
 def _build_professional_pdf(readings, generated_at, generated_by):
     """Build a clean, audit-ready PDF without exposing implementation errors."""
     import io
@@ -137,13 +175,20 @@ def _build_professional_pdf(readings, generated_at, generated_by):
     small = ParagraphStyle('ReportSmall', parent=styles['Normal'], fontSize=7.5, leading=9, textColor=muted)
     right = ParagraphStyle('ReportRight', parent=body, alignment=TA_RIGHT)
 
+    daily_summary_report = bool(readings and isinstance(readings[0], dict))
     latest = readings[0] if readings else None
     active_alerts = FloodAlert.objects.filter(is_active=True).count()
     active_residents = Resident.objects.filter(status='active').count()
     recent_sms = SMSLog.objects.filter(sent_at__gte=generated_at - timedelta(hours=24))
     sms_sent = recent_sms.filter(delivery_status__in=['sent', 'delivered']).count()
     sms_failed = recent_sms.filter(delivery_status='failed').count()
-    status_counts = {status_name: sum(1 for reading in readings if reading.status == status_name) for status_name in ['Normal', 'Alert', 'Warning', 'Danger']}
+    if daily_summary_report:
+        status_counts = {
+            status_name: sum(reading['status_counts'].get(status_name, 0) for reading in readings)
+            for status_name in ['Normal', 'Alert', 'Warning', 'Danger']
+        }
+    else:
+        status_counts = {status_name: sum(1 for reading in readings if reading.status == status_name) for status_name in ['Normal', 'Alert', 'Warning', 'Danger']}
 
     story = [
         Paragraph('AHON FloodWatch', title),
@@ -159,9 +204,14 @@ def _build_professional_pdf(readings, generated_at, generated_by):
         Paragraph('Executive summary', section),
     ]
 
-    latest_level = f'{latest.water_level_cm:.2f} cm' if latest else 'No reading'
-    latest_status = latest.status if latest else 'No data'
-    latest_time = _format_report_datetime(latest.timestamp) if latest else 'No reading'
+    if daily_summary_report and latest:
+        latest_level = f"{latest['latest_level']:.2f} cm"
+        latest_status = latest['latest_status']
+        latest_time = _format_report_datetime(latest['last_timestamp'])
+    else:
+        latest_level = f'{latest.water_level_cm:.2f} cm' if latest else 'No reading'
+        latest_status = latest.status if latest else 'No data'
+        latest_time = _format_report_datetime(latest.timestamp) if latest else 'No reading'
     summary_data = [
         [Paragraph('<b>Latest water level</b>', body), Paragraph('<b>Status</b>', body), Paragraph('<b>Active alerts</b>', body), Paragraph('<b>Active residents</b>', body), Paragraph('<b>SMS sent / failed</b>', body)],
         [Paragraph(latest_level, body), Paragraph(latest_status, body), Paragraph(str(active_alerts), body), Paragraph(str(active_residents), body), Paragraph(f'{sms_sent} / {sms_failed}', body)],
@@ -189,15 +239,24 @@ def _build_professional_pdf(readings, generated_at, generated_by):
         Paragraph('Telemetry history', section),
     ])
 
-    telemetry_rows = [[Paragraph('<b>Timestamp</b>', body), Paragraph('<b>Level</b>', body), Paragraph('<b>Status</b>', body), Paragraph('<b>Sensor</b>', body), Paragraph('<b>GSM</b>', body)]]
+    telemetry_rows = [[Paragraph('<b>Date / Time</b>', body), Paragraph('<b>Level</b>', body), Paragraph('<b>Status</b>', body), Paragraph('<b>Sensor</b>', body), Paragraph('<b>GSM</b>', body)]]
     for reading in readings[:25]:
-        telemetry_rows.append([
-            Paragraph(_format_report_datetime(reading.timestamp), small),
-            Paragraph(f'{reading.water_level_cm:.2f} cm', body),
-            Paragraph(reading.status, body),
-            Paragraph(reading.sensor_status, small),
-            Paragraph(reading.gsm_status, small),
-        ])
+        if daily_summary_report:
+            telemetry_rows.append([
+                Paragraph(f"{reading['date'].isoformat()}<br/>{_format_report_datetime(reading['last_timestamp'])}", small),
+                Paragraph(f"{reading['minimum_level']:.2f} - {reading['maximum_level']:.2f} cm<br/>Avg {reading['average_level']:.2f} cm", body),
+                Paragraph(reading['latest_status'], body),
+                Paragraph(reading['sensor_status'], small),
+                Paragraph(reading['gsm_status'], small),
+            ])
+        else:
+            telemetry_rows.append([
+                Paragraph(_format_report_datetime(reading.timestamp), small),
+                Paragraph(f'{reading.water_level_cm:.2f} cm', body),
+                Paragraph(reading.status, body),
+                Paragraph(reading.sensor_status, small),
+                Paragraph(reading.gsm_status, small),
+            ])
     if len(telemetry_rows) == 1:
         telemetry_rows.append([Paragraph('No telemetry recorded.', small), '', '', '', ''])
     story.append(Table(telemetry_rows, colWidths=[45 * mm, 29 * mm, 29 * mm, 29 * mm, 29 * mm], repeatRows=1, style=TableStyle([
@@ -241,38 +300,39 @@ def generate_report_view(request):
     - type: daily, weekly, monthly, annual
     - format: pdf, xlsx, csv
     """
-    report_type = request.query_params.get('type', 'daily')
+    report_type = request.query_params.get('type', 'monthly')
     file_format = request.query_params.get('file_format', request.query_params.get('format', 'pdf'))
-    
-    # Determine date range based on report type
-    end_date = timezone.now().date()
-    
-    if report_type == 'daily':
-        start_date = end_date - timedelta(days=1)
-    elif report_type == 'weekly':
-        start_date = end_date - timedelta(weeks=1)
-    elif report_type == 'monthly':
-        start_date = end_date - timedelta(days=30)
-    elif report_type == 'annual':
-        start_date = end_date - timedelta(days=365)
-    else:
+
+    if report_type not in {'weekly', 'monthly'}:
         return Response(
-            {'error': 'Invalid report type. Use daily, weekly, monthly, or annual.'},
+            {'error': 'Only weekly and monthly reports are supported.'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # Create report record
-    report = Report.objects.create(
+
+    if file_format not in {'pdf', 'xlsx', 'csv'}:
+        return Response(
+            {'error': 'file_format must be pdf, xlsx, or csv.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    from apps.water_level.models import WaterLevelReading
+
+    end_date = timezone.now().date()
+    start_date = end_date.replace(day=1) if report_type == 'monthly' else end_date - timedelta(days=end_date.weekday())
+    record_count = WaterLevelReading.objects.filter(
+        timestamp__date__gte=start_date,
+        timestamp__date__lte=end_date,
+    ).count()
+
+    report, _ = Report.objects.update_or_create(
         report_type=report_type,
         generated_by=request.user,
         start_date=start_date,
         end_date=end_date,
-        file_format=file_format
+        file_format=file_format,
+        defaults={'record_count': record_count},
     )
-    
-    # Generate report file (placeholder - actual implementation would use report generation logic)
-    # This would be implemented in a separate service
-    
+
     serializer = ReportSerializer(report)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -283,37 +343,21 @@ def report_statistics_view(request):
     """
     API endpoint to get report statistics.
     """
-    # Create sample reports if none exist
-    if Report.objects.count() == 0:
-        from datetime import timedelta
-        import random
-        report_types = ['daily', 'weekly', 'monthly', 'annual']
-        file_formats = ['pdf', 'xlsx', 'csv']
-        
-        for i in range(5):
-            Report.objects.create(
-                report_type=random.choice(report_types),
-                generated_by=request.user,
-                start_date=timezone.now().date() - timedelta(days=random.randint(1, 30)),
-                end_date=timezone.now().date(),
-                file_format=random.choice(file_formats),
-                record_count=random.randint(10, 100)
-            )
-    
-    total_reports = Report.objects.count()
+    supported_reports = Report.objects.filter(report_type__in=['weekly', 'monthly'])
+    total_reports = supported_reports.count()
     
     # Count by report type
     type_counts = {}
     for type_choice in Report.REPORT_TYPE_CHOICES:
         type_name = type_choice[0]
-        count = Report.objects.filter(report_type=type_name).count()
+        count = supported_reports.filter(report_type=type_name).count()
         type_counts[type_name] = count
     
     # Count by file format
     format_counts = {}
     for format_choice in Report.FILE_FORMAT_CHOICES:
         format_name = format_choice[0]
-        count = Report.objects.filter(file_format=format_name).count()
+        count = supported_reports.filter(file_format=format_name).count()
         format_counts[format_name] = count
     
     data = {
@@ -337,22 +381,61 @@ def export_report_view(request):
         from apps.water_level.models import WaterLevelReading
 
         file_format = request.query_params.get('file_format', 'pdf').lower()
-        readings = WaterLevelReading.objects.order_by('-timestamp')[:500]
+        report_id = request.query_params.get('report_id')
+        report = None
+        if report_id:
+            report = get_object_or_404(
+                Report,
+                report_id=report_id,
+                generated_by=request.user,
+                report_type__in=['weekly', 'monthly'],
+            )
+            readings = WaterLevelReading.objects.filter(
+                timestamp__date__gte=report.start_date,
+                timestamp__date__lte=report.end_date,
+            ).order_by('-timestamp')
+        else:
+            readings = WaterLevelReading.objects.order_by('-timestamp')[:500]
         generated_at = timezone.localtime()
-        filename = f'flood_telemetry_{generated_at.strftime("%Y%m%d_%H%M%S")}'
-        columns = ['Timestamp', 'Water Level (cm)', 'Status', 'Threshold Band', 'Sensor Status', 'GSM Status']
-
-        rows = [
-            [
-                _format_report_datetime(reading.timestamp),
-                f'{reading.water_level_cm:.2f}',
-                reading.status,
-                _report_band(reading.status),
-                reading.sensor_status,
-                reading.gsm_status,
+        filename = f'flood_telemetry_{report.start_date:%Y%m}' if report else f'flood_telemetry_{generated_at.strftime("%Y%m%d_%H%M%S")}'
+        raw_readings = list(readings)
+        daily_summaries = _summarize_daily_readings(raw_readings) if report else []
+        if report:
+            columns = [
+                'Date', 'First Reading', 'Last Reading', 'Minimum (cm)',
+                'Maximum (cm)', 'Average (cm)', 'Latest Level (cm)',
+                'Latest Status', 'Threshold Band', 'Reading Count',
             ]
-            for reading in readings
-        ]
+            rows = [
+                [
+                    summary['date'].isoformat(),
+                    _format_report_datetime(summary['first_timestamp']),
+                    _format_report_datetime(summary['last_timestamp']),
+                    f"{summary['minimum_level']:.2f}",
+                    f"{summary['maximum_level']:.2f}",
+                    f"{summary['average_level']:.2f}",
+                    f"{summary['latest_level']:.2f}",
+                    summary['latest_status'],
+                    _report_band(summary['latest_status']),
+                    summary['record_count'],
+                ]
+                for summary in daily_summaries
+            ]
+            coverage = f'{len(daily_summaries)} daily summaries from {len(raw_readings)} raw telemetry readings'
+        else:
+            columns = ['Timestamp', 'Water Level (cm)', 'Status', 'Threshold Band', 'Sensor Status', 'GSM Status']
+            rows = [
+                [
+                    _format_report_datetime(reading.timestamp),
+                    f'{reading.water_level_cm:.2f}',
+                    reading.status,
+                    _report_band(reading.status),
+                    reading.sensor_status,
+                    reading.gsm_status,
+                ]
+                for reading in raw_readings
+            ]
+            coverage = 'Latest 500 recorded telemetry readings'
 
         if file_format == 'csv':
             response = HttpResponse(content_type='text/csv; charset=utf-8')
@@ -361,7 +444,7 @@ def export_report_view(request):
             writer.writerow(['AHON FloodWatch Telemetry'])
             writer.writerow(['Generated At', _format_report_datetime(generated_at)])
             writer.writerow(['Generated By', request.user.get_username()])
-            writer.writerow(['Coverage', 'Latest 500 recorded telemetry readings'])
+            writer.writerow(['Coverage', coverage])
             writer.writerow(['Threshold Bands', 'Normal / Low | Warning / Moderate | Critical / High'])
             writer.writerow([])
             writer.writerow(columns)
@@ -375,16 +458,16 @@ def export_report_view(request):
             workbook = Workbook()
             sheet = workbook.active
             sheet.title = 'Telemetry'
-            sheet.merge_cells('A1:F1')
+            sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(columns))
             sheet['A1'] = 'AHON FloodWatch | Barangay Tonsuya'
             sheet['A1'].font = Font(bold=True, size=16, color='17324D')
             sheet['A1'].alignment = Alignment(horizontal='left')
             sheet.append(['Administrator Telemetry Report'])
-            sheet.merge_cells('A2:F2')
+            sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns))
             sheet['A2'].font = Font(italic=True, color='5F6B76')
             sheet.append(['Generated At', _format_report_datetime(generated_at)])
             sheet.append(['Generated By', request.user.get_username()])
-            sheet.append(['Coverage', 'Latest 500 recorded telemetry readings'])
+            sheet.append(['Coverage', coverage])
             sheet.append([''])
             sheet.append(columns)
             for row in rows:
@@ -395,16 +478,18 @@ def export_report_view(request):
                 cell.fill = PatternFill('solid', fgColor='2166A5')
                 cell.alignment = Alignment(horizontal='center')
                 cell.border = Border(bottom=Side(style='thin', color='D9E1E8'))
+            band_column = 8 if report else 4
             for row_number in range(header_row + 1, sheet.max_row + 1):
-                band = sheet.cell(row_number, 4).value
+                band = sheet.cell(row_number, band_column).value
                 fill = 'EAF5EA' if band == 'Normal / Low' else 'FFF4D6' if band == 'Warning / Moderate' else 'FDECEC'
                 for cell in sheet[row_number]:
                     cell.fill = PatternFill('solid', fgColor=fill)
                     cell.alignment = Alignment(vertical='center')
             sheet.freeze_panes = 'A8'
-            sheet.auto_filter.ref = f'A{header_row}:F{sheet.max_row}'
+            sheet.auto_filter.ref = f'A{header_row}:{chr(64 + len(columns))}{sheet.max_row}'
             sheet.sheet_properties.tabColor = '2166A5'
-            for column, width in {'A': 25, 'B': 18, 'C': 14, 'D': 22, 'E': 16, 'F': 14}.items():
+            widths = {'A': 14, 'B': 25, 'C': 25, 'D': 16, 'E': 16, 'F': 16, 'G': 18, 'H': 18, 'I': 22, 'J': 14} if report else {'A': 25, 'B': 18, 'C': 14, 'D': 22, 'E': 16, 'F': 14}
+            for column, width in widths.items():
                 sheet.column_dimensions[column].width = width
 
             buffer = io.BytesIO()
@@ -420,7 +505,7 @@ def export_report_view(request):
             return Response({'error': 'format must be pdf, csv, or xlsx.'}, status=status.HTTP_400_BAD_REQUEST)
 
         pdf_content = _build_professional_pdf(
-            list(readings),
+            daily_summaries if report else raw_readings,
             generated_at,
             request.user.get_username(),
         )

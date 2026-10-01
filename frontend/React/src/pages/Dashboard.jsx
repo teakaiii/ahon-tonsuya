@@ -65,7 +65,10 @@ const Dashboard = () => {
       ])
       setOverview(overviewResponse.data)
       setTelemetry(telemetryResponse.data)
-      setDecision(decisionResponse.data)
+      setDecision({
+        ...decisionResponse.data,
+        status_summary: (decisionResponse.data.status_summary || '').replace('Latest valid sensor reading is stale. ', ''),
+      })
       setError(null)
     } catch (requestError) {
       console.error('Dashboard fetch error:', requestError)
@@ -108,9 +111,13 @@ const Dashboard = () => {
   if (error && !overview) return <Alert severity="error">{error}</Alert>
 
   const current = overview?.current_water_level || {}
-  const currentBand = current.is_stale || current.quality_issue || current.status === 'No Data'
+  const currentBand = current.quality_issue || current.status === 'No Data'
     ? 'unknown'
-    : telemetry[0]?.band || (current.status === 'Danger' ? 'critical' : current.status === 'Warning' || current.status === 'Alert' ? 'warning' : 'normal')
+    : current.status === 'Danger'
+      ? 'critical'
+      : current.status === 'Warning' || current.status === 'Alert'
+        ? 'warning'
+        : telemetry[0]?.band || 'normal'
   const currentStyle = bandStyles[currentBand]
   const chartData = [...telemetry].reverse().map((item) => ({ time: formatTimestamp(item.timestamp).slice(11), level: item.water_level_cm }))
   const chartMax = Math.max(4, Math.ceil(Math.max(...chartData.map(({ level }) => Number(level) || 0))))
@@ -144,15 +151,13 @@ const Dashboard = () => {
         <CardContent sx={{ py: 1.75, '&:last-child': { pb: 1.75 } }}>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1}>
             <Box><Typography variant="caption" color="text.secondary">LATEST VALID WATER LEVEL</Typography><Typography variant="h3" sx={{ fontWeight: 750, lineHeight: 1.1 }}>{current.water_level_cm == null ? 'No reading' : `${current.at_calibrated_limit ? '≥' : ''}${Number(current.water_level_cm).toFixed(2)}`} {current.water_level_cm == null ? null : <Typography component="span" variant="h6" color="text.secondary">cm</Typography>}</Typography></Box>
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap"><Chip icon={statusIcon(currentBand)} color={currentStyle.color} label={current.is_stale ? 'Stale' : current.at_calibrated_limit ? 'At sensor limit' : current.quality_issue ? 'Check sensor' : currentStyle.label} /><Typography variant="caption" color="text.secondary">{current.is_stale ? 'Last valid reading' : 'Updated'} {formatTimestamp(current.timestamp)}</Typography></Stack>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap"><Chip icon={statusIcon(currentBand)} color={currentStyle.color} label={current.at_calibrated_limit ? 'At sensor limit' : current.quality_issue ? 'Check sensor' : currentStyle.label} /><Typography variant="caption" color="text.secondary">Updated {formatTimestamp(current.timestamp)}</Typography></Stack>
           </Stack>
         </CardContent>
       </Card>
-      {(current.is_stale || current.quality_issue) && (
+      {current.quality_issue && (
         <Alert severity="warning" sx={{ mb: 1.5 }}>
-          {current.quality_issue || (current.water_level_cm == null
-            ? 'No calibrated sensor reading is available.'
-            : `The last valid reading is ${current.reading_age_seconds ?? 'unknown'} seconds old.`)} Verify the sensor before relying on this value.
+          {current.quality_issue} Verify the sensor before relying on this value.
         </Alert>
       )}
 
@@ -160,7 +165,7 @@ const Dashboard = () => {
         <Metric title="Active alerts" value={overview?.alerts?.active_count || 0} detail={`${overview?.alerts?.recent_count || 0} in last 24h`} icon={<WarningAmber />} color="#ed6c02" />
         <Metric title="Residents" value={overview?.residents?.total || 0} detail={`${overview?.residents?.active || 0} active`} icon={<People />} color="#1565c0" />
         <Metric title="SMS delivery" value={overview?.sms?.sent_last_24h || 0} detail={`${overview?.sms?.failed_last_24h || 0} failed in 24h`} icon={<Sms />} color="#2e7d32" />
-        <Metric title="Sensor / GSM" value={!current.is_stale && !current.quality_issue && current.sensor_status === 'online' ? 'Online' : current.water_level_cm == null ? 'Offline' : 'Check'} detail={`${current.gsm_status || 'unknown'} | 10s refresh`} icon={<MonitorHeart />} color="#6a1b9a" />
+        <Metric title="Sensor / GSM" value={!current.quality_issue && current.sensor_status === 'online' ? 'Online' : current.water_level_cm == null ? 'Offline' : 'Check'} detail={`${current.gsm_status || 'unknown'} | 10s refresh`} icon={<MonitorHeart />} color="#6a1b9a" />
       </Grid>
 
       <Grid container spacing={1.5}>

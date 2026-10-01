@@ -34,19 +34,13 @@ import {
 } from '@mui/icons-material'
 import api from '../services/api'
 
-const isFloodAlert = (notification) => {
-  const content = `${notification.title || ''} ${notification.message || ''}`
-  const isAlertType = ['danger', 'alert', 'warning'].includes(notification.type)
-  const isFloodContent = /(flood|water level|evacuat|overflow|rainfall|barrier)/i.test(content)
-  return isAlertType && isFloodContent
-}
-
 const Notifications = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
   const [viewFilter, setViewFilter] = useState('all')
+  const [expandedNotifications, setExpandedNotifications] = useState(new Set())
 
   useEffect(() => {
     fetchNotifications()
@@ -60,9 +54,8 @@ const Notifications = () => {
     try {
       const response = await api.get('/api/notifications/')
       const records = response.data.results || response.data
-      const floodAlerts = records.filter(isFloodAlert)
-      setNotifications(floodAlerts)
-      setUnreadCount(floodAlerts.filter((notification) => !notification.is_read).length)
+      setNotifications(records)
+      setUnreadCount(records.filter((notification) => !notification.is_read).length)
       setError(null)
     } catch (err) {
       setError('Failed to fetch notifications')
@@ -78,6 +71,16 @@ const Notifications = () => {
     } catch (err) {
       setError('Failed to mark notification as read')
     }
+  }
+
+  const handleNotificationClick = (notification) => {
+    setExpandedNotifications((current) => {
+      const next = new Set(current)
+      if (next.has(notification.notif_id)) next.delete(notification.notif_id)
+      else next.add(notification.notif_id)
+      return next
+    })
+    if (!notification.is_read) handleMarkAsRead(notification.notif_id)
   }
 
   const handleMarkAllAsRead = async () => {
@@ -160,9 +163,6 @@ const Notifications = () => {
           <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.25 }}>
             Notifications
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Flood alerts requiring administrator attention
-          </Typography>
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
           <Badge badgeContent={unreadCount} color="error"><NotificationsIcon color="action" /></Badge>
@@ -174,7 +174,7 @@ const Notifications = () => {
               <MenuItem value="read">Read</MenuItem>
             </Select>
           </FormControl>
-          <Tooltip title="Refresh flood alerts"><IconButton onClick={fetchNotifications}><RefreshIcon /></IconButton></Tooltip>
+          <Tooltip title="Refresh notifications"><IconButton onClick={fetchNotifications}><RefreshIcon /></IconButton></Tooltip>
           {unreadCount > 0 && (
             <Button variant="outlined" size="small" startIcon={<MarkReadIcon />} onClick={handleMarkAllAsRead}>Mark all read</Button>
           )}
@@ -192,7 +192,7 @@ const Notifications = () => {
                 {notifications.length === 0 ? 'No notifications yet' : 'No matching notifications'}
               </Typography>
               <Typography variant="body2" color="textSecondary">
-                {notifications.length === 0 ? 'New system alerts will appear here.' : 'Try changing the view filter.'}
+                {notifications.length === 0 ? 'New system activity and alerts will appear here.' : 'Try changing the view filter.'}
               </Typography>
             </Box>
           ) : (
@@ -203,18 +203,35 @@ const Notifications = () => {
                     const displayType = getDisplayType(notification)
                     return (
                   <ListItem
+                    button
+                    tabIndex={0}
+                    aria-label={`Open notification: ${notification.title}`}
+                    aria-expanded={expandedNotifications.has(notification.notif_id)}
+                    onClick={() => handleNotificationClick(notification)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        handleNotificationClick(notification)
+                      }
+                    }}
                     sx={{
                       bgcolor: notification.is_read ? 'transparent' : '#f1f7fd',
                       borderLeft: notification.is_read ? '3px solid transparent' : '3px solid #1976d2',
                       px: 1.5,
                       py: 1.25,
+                      cursor: 'pointer',
+                      '&:hover': { bgcolor: '#eaf2fa' },
+                      '&:focus-visible': { outline: '2px solid #1976d2', outlineOffset: '-2px' },
                     }}
                     secondaryAction={
                       <Box>
                         {!notification.is_read && (
                           <Tooltip title="Mark as read"><IconButton
                             edge="end"
-                            onClick={() => handleMarkAsRead(notification.notif_id)}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              handleMarkAsRead(notification.notif_id)
+                            }}
                             sx={{ mr: 1 }}
                           >
                             <MarkReadIcon />
@@ -222,7 +239,10 @@ const Notifications = () => {
                         )}
                         <Tooltip title="Delete notification"><IconButton
                           edge="end"
-                          onClick={() => handleDelete(notification.notif_id)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            handleDelete(notification.notif_id)
+                          }}
                         >
                           <DeleteIcon />
                         </IconButton></Tooltip>
@@ -247,8 +267,8 @@ const Notifications = () => {
                         </Box>
                       }
                       secondaryTypographyProps={{ component: 'div' }}
-                      secondary={
-                        <Box>
+                      secondary={expandedNotifications.has(notification.notif_id) ? (
+                        <Box sx={{ mt: 0.75 }}>
                           <Typography variant="body2" color="textSecondary">
                             {notification.message}
                           </Typography>
@@ -256,7 +276,7 @@ const Notifications = () => {
                             {formatTimestamp(notification.created_at)}
                           </Typography>
                         </Box>
-                      }
+                      ) : null}
                     />
                   </ListItem>
                     )

@@ -1,37 +1,38 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
+  Alert,
   Box,
-  Grid,
+  Button,
   Card,
   CardContent,
-  Typography,
+  Chip,
   CircularProgress,
-  Alert,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  Grid,
+  InputLabel,
+  MenuItem,
+  Select,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
-  Paper,
-  Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
-  Chip,
+  Typography,
 } from '@mui/material'
 import {
-  PictureAsPdf as PdfIcon,
   Description as ExcelIcon,
-  TableChart as CsvIcon,
   Download as DownloadIcon,
+  PictureAsPdf as PdfIcon,
+  TableChart as CsvIcon,
 } from '@mui/icons-material'
 import api from '../services/api'
+
+const REPORT_TYPES = ['weekly', 'monthly']
 
 const Reports = () => {
   const [loading, setLoading] = useState(true)
@@ -39,7 +40,7 @@ const Reports = () => {
   const [reports, setReports] = useState([])
   const [statistics, setStatistics] = useState(null)
   const [openDialog, setOpenDialog] = useState(false)
-  const [reportType, setReportType] = useState('daily')
+  const [reportType, setReportType] = useState('monthly')
   const [fileFormat, setFileFormat] = useState('pdf')
 
   useEffect(() => {
@@ -50,9 +51,10 @@ const Reports = () => {
   const fetchReports = async () => {
     try {
       const response = await api.get('/api/reports/')
-      setReports(response.data.results || response.data)
+      const records = response.data.results || response.data
+      setReports(records.filter((report) => REPORT_TYPES.includes(report.report_type)))
       setError(null)
-    } catch (err) {
+    } catch (requestError) {
       setError('Failed to fetch reports')
     } finally {
       setLoading(false)
@@ -63,8 +65,8 @@ const Reports = () => {
     try {
       const response = await api.get('/api/reports/statistics/')
       setStatistics(response.data)
-    } catch (err) {
-      console.error('Failed to fetch statistics:', err)
+    } catch (requestError) {
+      console.error('Failed to fetch statistics:', requestError)
     }
   }
 
@@ -72,221 +74,110 @@ const Reports = () => {
     try {
       await api.get(`/api/reports/generate/?type=${reportType}&file_format=${fileFormat}`)
       setOpenDialog(false)
-      fetchReports()
-      fetchStatistics()
-    } catch (err) {
+      await Promise.all([fetchReports(), fetchStatistics()])
+    } catch (requestError) {
       setError('Failed to generate report')
     }
   }
 
-  const handleDownloadReport = (report) => {
-    api.get(`/api/reports/export/?file_format=${report.file_format}`, { responseType: 'blob' })
-      .then((response) => {
-        const url = window.URL.createObjectURL(response.data)
-        const link = document.createElement('a')
-        link.href = url
-        link.download = `ahon-floodwatch-telemetry-${new Date().toISOString().replace(/[:.]/g, '-')}.${report.file_format}`
-        document.body.appendChild(link)
-        link.click()
-        link.remove()
-        window.URL.revokeObjectURL(url)
-      })
-      .catch(() => setError('Failed to download report'))
-  }
-
-  const getReportTypeColor = (type) => {
-    switch (type) {
-      case 'daily':
-        return 'info'
-      case 'weekly':
-        return 'success'
-      case 'monthly':
-        return 'warning'
-      case 'annual':
-        return 'error'
-      default:
-        return 'default'
+  const handleDownloadReport = async (report) => {
+    try {
+      const response = await api.get(
+        `/api/reports/export/?report_id=${report.report_id}&file_format=${report.file_format}`,
+        { responseType: 'blob' },
+      )
+      const url = window.URL.createObjectURL(response.data)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `ahon-floodwatch-${report.report_type}-${report.start_date}.${report.file_format}`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (requestError) {
+      setError('Failed to download report')
     }
   }
 
+  const getReportTypeColor = (type) => type === 'weekly' ? 'success' : 'warning'
   const getFormatIcon = (format) => {
-    switch (format) {
-      case 'pdf':
-        return <PdfIcon />
-      case 'xlsx':
-        return <ExcelIcon />
-      case 'csv':
-        return <CsvIcon />
-      default:
-        return <DownloadIcon />
-    }
+    if (format === 'pdf') return <PdfIcon />
+    if (format === 'xlsx') return <ExcelIcon />
+    if (format === 'csv') return <CsvIcon />
+    return <DownloadIcon />
   }
 
   if (loading) {
-    return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
-        <CircularProgress />
-      </Box>
-    )
+    return <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px"><CircularProgress /></Box>
   }
 
   return (
     <Box>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
         <Box>
-          <Typography variant="h4" gutterBottom>
-            Reports
-          </Typography>
-          <Typography variant="body1" color="text.secondary">
-            Generate and download flood detection reports
-          </Typography>
+          <Typography variant="h4" gutterBottom>Reports</Typography>
+          <Typography variant="body1" color="text.secondary">Generate compact weekly or monthly telemetry reports</Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<DownloadIcon />}
-          onClick={() => setOpenDialog(true)}
-        >
-          Generate Report
-        </Button>
+        <Button variant="contained" startIcon={<DownloadIcon />} onClick={() => setOpenDialog(true)}>Generate Report</Button>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      {/* Statistics Cards */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom variant="body2">
-                Total Reports
-              </Typography>
-              <Typography variant="h4">
-                {statistics?.total_reports || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom variant="body2">
-                Daily Reports
-              </Typography>
-              <Typography variant="h4">
-                {statistics?.type_counts?.daily || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom variant="body2">
-                Weekly Reports
-              </Typography>
-              <Typography variant="h4">
-                {statistics?.type_counts?.weekly || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom variant="body2">
-                Monthly Reports
-              </Typography>
-              <Typography variant="h4">
-                {statistics?.type_counts?.monthly || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
+        <Grid item xs={12} sm={4}><StatCard label="Total Reports" value={statistics?.total_reports || 0} /></Grid>
+        <Grid item xs={12} sm={4}><StatCard label="Weekly Reports" value={statistics?.type_counts?.weekly || 0} /></Grid>
+        <Grid item xs={12} sm={4}><StatCard label="Monthly Reports" value={statistics?.type_counts?.monthly || 0} /></Grid>
       </Grid>
 
-      {/* Reports Table */}
       <Card>
         <CardContent>
-          <TableContainer component={Paper}>
+          <TableContainer>
             <Table>
-              <TableHead>
-                <TableRow>
-                  <TableCell>Report Type</TableCell>
-                  <TableCell>Generated By</TableCell>
-                  <TableCell>Date Range</TableCell>
-                  <TableCell>Format</TableCell>
-                  <TableCell>Records</TableCell>
-                  <TableCell>Created At</TableCell>
-                  <TableCell>Actions</TableCell>
-                </TableRow>
-              </TableHead>
+              <TableHead><TableRow>
+                <TableCell>Report Type</TableCell>
+                <TableCell>Generated By</TableCell>
+                <TableCell>Date Range</TableCell>
+                <TableCell>Format</TableCell>
+                <TableCell>Records</TableCell>
+                <TableCell>Created At</TableCell>
+                <TableCell>Actions</TableCell>
+              </TableRow></TableHead>
               <TableBody>
                 {reports.map((report) => (
                   <TableRow key={report.report_id}>
-                    <TableCell>
-                      <Chip
-                        label={report.report_type}
-                        color={getReportTypeColor(report.report_type)}
-                        size="small"
-                      />
-                    </TableCell>
+                    <TableCell><Chip label={report.report_type} color={getReportTypeColor(report.report_type)} size="small" /></TableCell>
                     <TableCell>{report.generated_by_username}</TableCell>
-                    <TableCell>
-                      {new Date(report.start_date).toLocaleDateString()} - {new Date(report.end_date).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell>
-                      <Box display="flex" alignItems="center">
-                        {getFormatIcon(report.file_format)}
-                        <span style={{ marginLeft: 8 }}>{report.file_format?.toUpperCase()}</span>
-                      </Box>
-                    </TableCell>
+                    <TableCell>{new Date(report.start_date).toLocaleDateString()} - {new Date(report.end_date).toLocaleDateString()}</TableCell>
+                    <TableCell><Box display="flex" alignItems="center" gap={1}>{getFormatIcon(report.file_format)}{report.file_format?.toUpperCase()}</Box></TableCell>
                     <TableCell>{report.record_count}</TableCell>
-                    <TableCell>
-                      {new Date(report.created_at).toLocaleString()}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        startIcon={<DownloadIcon />}
-                        onClick={() => handleDownloadReport(report)}
-                      >
-                        Download
-                      </Button>
-                    </TableCell>
+                    <TableCell>{new Date(report.created_at).toLocaleString()}</TableCell>
+                    <TableCell><Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={() => handleDownloadReport(report)}>Download</Button></TableCell>
                   </TableRow>
                 ))}
+                {!reports.length && <TableRow><TableCell colSpan={7} align="center">No weekly or monthly reports yet.</TableCell></TableRow>}
               </TableBody>
             </Table>
           </TableContainer>
         </CardContent>
       </Card>
 
-      {/* Generate Report Dialog */}
       <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Generate Report</DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 2 }}>
             <FormControl fullWidth sx={{ mb: 2 }}>
               <InputLabel>Report Type</InputLabel>
-              <Select
-                value={reportType}
-                label="Report Type"
-                onChange={(e) => setReportType(e.target.value)}
-              >
-                <MenuItem value="daily">Daily Report</MenuItem>
+              <Select value={reportType} label="Report Type" onChange={(event) => setReportType(event.target.value)}>
                 <MenuItem value="weekly">Weekly Report</MenuItem>
                 <MenuItem value="monthly">Monthly Report</MenuItem>
-                <MenuItem value="annual">Annual Report</MenuItem>
               </Select>
             </FormControl>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              {reportType === 'weekly' ? 'Current calendar week, summarized per day.' : 'Current calendar month, summarized per day.'}
+            </Typography>
             <FormControl fullWidth>
               <InputLabel>File Format</InputLabel>
-              <Select
-                value={fileFormat}
-                label="File Format"
-                onChange={(e) => setFileFormat(e.target.value)}
-              >
+              <Select value={fileFormat} label="File Format" onChange={(event) => setFileFormat(event.target.value)}>
                 <MenuItem value="pdf">PDF</MenuItem>
                 <MenuItem value="xlsx">Excel (XLSX)</MenuItem>
                 <MenuItem value="csv">CSV</MenuItem>
@@ -296,13 +187,15 @@ const Reports = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setOpenDialog(false)}>Cancel</Button>
-          <Button onClick={handleGenerateReport} variant="contained">
-            Generate
-          </Button>
+          <Button onClick={handleGenerateReport} variant="contained">Generate</Button>
         </DialogActions>
       </Dialog>
     </Box>
   )
 }
+
+const StatCard = ({ label, value }) => (
+  <Card><CardContent><Typography color="text.secondary" gutterBottom variant="body2">{label}</Typography><Typography variant="h4">{value}</Typography></CardContent></Card>
+)
 
 export default Reports
